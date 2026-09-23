@@ -21,3 +21,7 @@ __pycache__/
 *.srt
 *.vtt
 *.lrc
+
+# benchmark scratch
+bench/ov-*/
+bench/*.npy
