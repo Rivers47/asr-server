@@ -195,15 +195,14 @@ def run_torch(chunks: list[np.ndarray], device: str, args) -> tuple[float, list[
         getattr(torch, device).synchronize()
     load_s = time.perf_counter() - started
 
-    forced = processor.get_decoder_prompt_ids(language=args.language, task="transcribe")
-
     def decode(audio: np.ndarray) -> str:
         features = processor(audio, sampling_rate=SAMPLE_RATE, return_tensors="pt").input_features
         with torch.inference_mode():
             tokens = model.generate(
                 features.to(device, dtype=dtype),
                 num_beams=args.beam_size,
-                forced_decoder_ids=forced,
+                language=args.language,
+                task="transcribe",
                 max_new_tokens=440,
             )
         if device != "cpu":
@@ -227,11 +226,15 @@ def run_openvino(chunks: list[np.ndarray], device: str, args) -> tuple[float, li
     )
     load_s = time.perf_counter() - started
 
-    forced = processor.get_decoder_prompt_ids(language=args.language, task="transcribe")
-
     def decode(audio: np.ndarray) -> str:
         features = processor(audio, sampling_rate=SAMPLE_RATE, return_tensors="pt").input_features
-        tokens = model.generate(features, num_beams=args.beam_size, forced_decoder_ids=forced, max_new_tokens=440)
+        tokens = model.generate(
+            features,
+            num_beams=args.beam_size,
+            language=args.language,
+            task="transcribe",
+            max_new_tokens=440,
+        )
         return processor.batch_decode(tokens, skip_special_tokens=True)[0].strip()
 
     return load_s, _decode_all(chunks, decode, args)
@@ -361,6 +364,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-warmup", dest="warmup", action="store_false", help="skip the untimed first pass")
     parser.add_argument("--show-text", action="store_true", help="print each backend's transcript")
     parser.add_argument(
+        "--scratch-dir",
+        default=None,
+        help="where to stage the shared chunk plan (default: $TMPDIR). Audio is written as float32, "
+        "so an hour of input needs ~230 MB -- point this somewhere with room if /tmp is small.",
+    )
+    parser.add_argument(
         "--python",
         action="append",
         default=[],
@@ -409,7 +418,7 @@ def main(argv: list[str] | None = None) -> int:
 
     import tempfile
 
-    with tempfile.TemporaryDirectory() as scratch:
+    with tempfile.TemporaryDirectory(dir=args.scratch_dir) as scratch:
         chunks_file = os.path.join(scratch, "audio.npy")
         bounds_file = os.path.join(scratch, "bounds.npy")
         np.save(chunks_file, audio)

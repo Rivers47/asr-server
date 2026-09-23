@@ -116,6 +116,53 @@ backend, so measure it separately if you get that far:
 One trap: whisper.cpp's *OpenVINO* backend accelerates only the encoder and
 leaves the decoder on CPU. Build the **SYCL** backend, not the OpenVINO one.
 
+## Known install traps
+
+Hit while trying to benchmark `openvino-cpu` in this repo's environment
+(Python 3.14, September 2026). The CTranslate2 baseline installed and ran first
+try; the OpenVINO stack took three tries and still did not convert.
+
+**1. `torchvision` from the wrong index.** `pip install optimum-intel[openvino]`
+pulls `torchvision` from the default index, which will not match a CPU or XPU
+torch build:
+
+```
+RuntimeError: operator torchvision::nms does not exist
+```
+
+It blocks `from optimum.intel import ...` entirely. Whisper needs no vision
+stack, so `pip uninstall torchvision` fixes it — optimum-intel still lists it as
+a hard requirement, so pip will warn.
+
+**2. `forced_decoder_ids` is gone in transformers 5.x.** `generate()` no longer
+accepts it. Pass `language=` and `task=` directly instead; that works on
+transformers 4.39+ and 5.x alike. This harness already does.
+
+**3. The OpenVINO export fails outright.** With `optimum 2.3.0` +
+`optimum-intel 2.2.0` (the versions pip resolves), both the CLI and the
+in-process `export=True` path die identically:
+
+```
+TypeError: NormalizedConfig.__init__() got multiple values for argument 'allow_new'
+```
+
+Not a model problem — `WhisperOpenVINOConfig.NORMALIZED_CONFIG_CLASS(config)`
+constructs fine when called directly, so the exporter is resolving a different
+config class. Asking `TasksManager` shows why:
+
+```
+KeyError: 'whisper is not supported yet for transformers.
+Only [] are supported for the library transformers.'
+```
+
+An empty task registry. In optimum 2.x the exporters moved into separate
+packages (`optimum-onnx`, `optimum-intel`) and the registry the backend is meant
+to populate is coming up empty. Downgrading transformers to 4.57.6 did not help.
+
+If you need OpenVINO, try the last 1.x pair (`optimum-intel~=1.27`, which pairs
+with `optimum` 1.x) before spending time elsewhere. Otherwise **start with
+`torch-xpu`** — it needs no conversion at all and so cannot hit any of this.
+
 ## Reference numbers
 
 From this repo's environment, so only the shape matters — your Arc box will
