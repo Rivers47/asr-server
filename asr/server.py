@@ -169,6 +169,41 @@ def safe_suffix(filename: str | None) -> str:
     return ".bin"
 
 
+# Decoding settings a caller may override per request. Everything else --
+# language, task, the VAD parameters, chunking -- is process-wide and comes from
+# generation_config.json5, because changing it per request would mean reloading
+# or re-planning work the server does once at startup.
+MAX_HOTWORDS_CHARS = 1024  # Whisper's prompt window is 224 tokens; this is well past it
+MAX_BEAM_SIZE = 10  # decode cost scales with beam width, so cap what a caller can ask for
+
+
+def parse_overrides(query: dict[str, list[str]]) -> dict[str, Any]:
+    """Read per-request decoding overrides off the query string.
+
+    Raises ValueError with a caller-facing message for anything malformed.
+    """
+    overrides: dict[str, Any] = {}
+
+    if "hotwords" in query:
+        hotwords = query["hotwords"][0]
+        if len(hotwords) > MAX_HOTWORDS_CHARS:
+            raise ValueError(f"hotwords is {len(hotwords)} characters; the limit is {MAX_HOTWORDS_CHARS}")
+        # An explicit empty value is meaningful: it clears whatever the config set.
+        overrides["hotwords"] = hotwords
+
+    if "beam_size" in query:
+        raw = query["beam_size"][0]
+        try:
+            beam_size = int(raw)
+        except ValueError:
+            raise ValueError(f"beam_size must be an integer, got {raw!r}") from None
+        if not 1 <= beam_size <= MAX_BEAM_SIZE:
+            raise ValueError(f"beam_size must be between 1 and {MAX_BEAM_SIZE}, got {beam_size}")
+        overrides["beam_size"] = beam_size
+
+    return overrides
+
+
 # --------------------------------------------------------------------------
 # transcription
 # --------------------------------------------------------------------------
@@ -228,10 +263,14 @@ class TranscriptionService:
             "queued": self.queue_depth,
         }
 
-    def transcribe(self, audio_path: str) -> tuple[list[Segment], float, float]:
+    def transcribe(
+        self, audio_path: str, overrides: dict[str, Any] | None = None
+    ) -> tuple[list[Segment], float, float]:
         """Transcribe one file, returning its segments and duration accounting.
 
-        Raises ``TranscriptionError`` if too many requests are already queued.
+        ``overrides`` are decoding settings layered over the process-wide config
+        for this call only. Raises ``TranscriptionError`` if too many requests
+        are already queued.
         """
         with self._waiting_lock:
             if self._waiting >= self.max_queue:
@@ -239,12 +278,14 @@ class TranscriptionService:
             self._waiting += 1
         try:
             with self._lock:
-                return self._transcribe_locked(audio_path)
+                return self._transcribe_locked(audio_path, overrides)
         finally:
             with self._waiting_lock:
                 self._waiting -= 1
 
-    def _transcribe_locked(self, audio_path: str) -> tuple[list[Segment], float, float]:
+    def _transcribe_locked(
+        self, audio_path: str, overrides: dict[str, Any] | None = None
+    ) -> tuple[list[Segment], float, float]:
         # Mirrors the per-file body of Inference.generates(), minus the batching
         # path (which auto-tunes against a sample file) and minus writing to disk.
         inference = self.inference
@@ -252,7 +293,7 @@ class TranscriptionService:
 
         if inference._should_use_smart_split():
             task = InferenceTask(audio_path=audio_path, sub_prefix="", sub_formats=[])
-            segments, info = inference._transcribe_smart_chunks(self.model, task)
+            segments, info = inference._transcribe_smart_chunks(self.model, task, overrides)
             duration_after_vad = info.duration_after_vad
         else:
             audio_input, config, manual_duration_after_vad = inference._prepare_transcription(audio_path, batched=False)
@@ -361,15 +402,25 @@ class TranscribeHandler(BaseHTTPRequestHandler):
             return
 
         try:
+            overrides = parse_overrides(query)
+        except ValueError as exc:
+            self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
+            return
+
+        try:
             audio_path, cleanup = self._receive_upload()
         except ValueError as exc:
             self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
             return
 
         try:
-            logger.info("Transcribing upload (%s bytes)", os.path.getsize(audio_path))
+            logger.info(
+                "Transcribing upload (%s bytes)%s",
+                os.path.getsize(audio_path),
+                f" with {overrides}" if overrides else "",
+            )
             started = time.monotonic()
-            segments, duration, duration_after_vad = self.service.transcribe(audio_path)
+            segments, duration, duration_after_vad = self.service.transcribe(audio_path, overrides)
             elapsed = time.monotonic() - started
             logger.info("Transcribed %.1fs of audio in %.1fs -> %d segment(s)", duration, elapsed, len(segments))
         except TranscriptionError as exc:
@@ -383,7 +434,7 @@ class TranscribeHandler(BaseHTTPRequestHandler):
             cleanup()
 
         if fmt == "json":
-            config = self.service.inference.generation_config
+            config = {**self.service.inference.generation_config, **overrides}
             self._send_json(
                 HTTPStatus.OK,
                 {
@@ -400,6 +451,9 @@ class TranscribeHandler(BaseHTTPRequestHandler):
                     "duration_after_vad": round(duration_after_vad, 3),
                     "language": config.get("language"),
                     "task": config.get("task"),
+                    # Echoed so a caller can confirm what actually applied.
+                    "hotwords": config.get("hotwords", ""),
+                    "beam_size": config.get("beam_size"),
                     "processing_time": round(elapsed, 3),
                 },
             )

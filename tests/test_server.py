@@ -14,11 +14,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from asr.pipeline import Segment, SegmentMergeOptions  # noqa: E402
 from asr.server import (  # noqa: E402
+    MAX_BEAM_SIZE,
+    MAX_HOTWORDS_CHARS,
     TranscribeHandler,
     TranscriptionError,
     TranscriptionService,
     parse_content_type,
     parse_multipart,
+    parse_overrides,
     render_subtitle,
     resolve_args,
     safe_suffix,
@@ -112,12 +115,14 @@ class FakeService:
         self.mode = "ok"
         self.seen_path = None
         self.seen_bytes = None
+        self.seen_overrides = None
 
     def describe(self):
         return {"model": "models", "device": "cpu", "task": "transcribe", "queued": 0}
 
-    def transcribe(self, audio_path):
+    def transcribe(self, audio_path, overrides=None):
         self.seen_path = audio_path
+        self.seen_overrides = overrides
         with open(audio_path, "rb") as f:
             self.seen_bytes = f.read()
         if self.mode == "busy":
@@ -317,6 +322,80 @@ class TranscribeEndpointTest(HandlerTestCase):
         self.assertEqual(responses[0][1].get("connection"), "close")
 
 
+class ParseOverridesTest(unittest.TestCase):
+    def test_absent_parameters_produce_no_overrides(self):
+        self.assertEqual(parse_overrides({}), {})
+        self.assertEqual(parse_overrides({"format": ["srt"]}), {})
+
+    def test_hotwords_and_beam_size(self):
+        self.assertEqual(
+            parse_overrides({"hotwords": ["柚姫, 父さま"], "beam_size": ["5"]}),
+            {"hotwords": "柚姫, 父さま", "beam_size": 5},
+        )
+
+    def test_empty_hotwords_is_kept_so_it_can_clear_the_config(self):
+        self.assertEqual(parse_overrides({"hotwords": [""]}), {"hotwords": ""})
+
+    def test_hotwords_length_is_capped(self):
+        parse_overrides({"hotwords": ["x" * MAX_HOTWORDS_CHARS]})  # at the limit, fine
+        with self.assertRaises(ValueError) as caught:
+            parse_overrides({"hotwords": ["x" * (MAX_HOTWORDS_CHARS + 1)]})
+        self.assertIn("limit", str(caught.exception))
+
+    def test_beam_size_must_be_an_integer(self):
+        for bad in ("wide", "3.5", ""):
+            with self.subTest(value=bad), self.assertRaises(ValueError) as caught:
+                parse_overrides({"beam_size": [bad]})
+            self.assertIn("must be an integer", str(caught.exception))
+
+    def test_beam_size_is_bounded(self):
+        self.assertEqual(parse_overrides({"beam_size": ["1"]}), {"beam_size": 1})
+        self.assertEqual(parse_overrides({"beam_size": [str(MAX_BEAM_SIZE)]}), {"beam_size": MAX_BEAM_SIZE})
+        for bad in ("0", "-1", str(MAX_BEAM_SIZE + 1), "9999"):
+            with self.subTest(value=bad), self.assertRaises(ValueError) as caught:
+                parse_overrides({"beam_size": [bad]})
+            self.assertIn("between 1 and", str(caught.exception))
+
+
+class OverrideEndpointTest(HandlerTestCase):
+    def test_overrides_reach_the_service_and_are_echoed(self):
+        status, _, body = self.request(
+            "POST", "/transcribe?hotwords=%E6%9F%9A%E5%A7%AB&beam_size=3", AUDIO, AUDIO_HEADERS
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(self.service.seen_overrides, {"hotwords": "柚姫", "beam_size": 3})
+        payload = json.loads(body)
+        self.assertEqual(payload["hotwords"], "柚姫")
+        self.assertEqual(payload["beam_size"], 3)
+
+    def test_without_overrides_the_response_echoes_the_process_config(self):
+        self.service.inference.generation_config["beam_size"] = 5
+        status, _, body = self.request("POST", "/transcribe", AUDIO, AUDIO_HEADERS)
+        self.assertEqual(status, 200)
+        self.assertIsNone(self.service.seen_overrides or None)
+        payload = json.loads(body)
+        self.assertEqual(payload["beam_size"], 5)
+        self.assertEqual(payload["hotwords"], "")
+
+    def test_overrides_combine_with_format(self):
+        status, headers, body = self.request("POST", "/transcribe?format=srt&beam_size=2", AUDIO, AUDIO_HEADERS)
+        self.assertEqual(status, 200)
+        self.assertTrue(headers["content-type"].startswith("application/x-subrip"))
+        self.assertEqual(self.service.seen_overrides, {"beam_size": 2})
+
+    def test_bad_override_is_rejected_before_the_upload_is_read(self):
+        for query, expected in (
+            ("beam_size=wide", "must be an integer"),
+            ("beam_size=99", "between 1 and"),
+            (f"hotwords={'x' * (MAX_HOTWORDS_CHARS + 1)}", "limit"),
+        ):
+            with self.subTest(query=query):
+                status, _, body = self.request("POST", f"/transcribe?{query}", AUDIO, AUDIO_HEADERS)
+                self.assertEqual(status, 400)
+                self.assertIn(expected, json.loads(body)["error"])
+                self.assertIsNone(self.service.seen_path, "upload should not have been spooled")
+
+
 def bare_service(inference, model, max_queue: int = 8) -> TranscriptionService:
     """Build a TranscriptionService without running __init__ (which loads models)."""
     service = TranscriptionService.__new__(TranscriptionService)
@@ -333,9 +412,10 @@ class TranscriptionServiceTest(unittest.TestCase):
     def test_smart_split_path_is_used_when_enabled(self):
         seen = {}
 
-        def smart_chunks(model, task):
+        def smart_chunks(model, task, overrides=None):
             seen["model"] = model
             seen["audio_path"] = task.audio_path
+            seen["overrides"] = overrides
             return (
                 [Segment(0, 1_000, "あ"), Segment(1_000, 2_000, "い")],
                 SimpleNamespace(duration=30.0, duration_after_vad=2.0),
@@ -349,7 +429,7 @@ class TranscriptionServiceTest(unittest.TestCase):
         service = bare_service(inference, "MODEL")
         segments, duration, duration_after_vad = service.transcribe("/tmp/x.wav")
 
-        self.assertEqual(seen, {"model": "MODEL", "audio_path": "/tmp/x.wav"})
+        self.assertEqual(seen, {"model": "MODEL", "audio_path": "/tmp/x.wav", "overrides": None})
         self.assertEqual((duration, duration_after_vad), (30.0, 2.0))
         self.assertEqual([segment.text for segment in segments], ["あ", "い"])
         self.assertEqual(service.queue_depth, 0)
@@ -361,7 +441,7 @@ class TranscriptionServiceTest(unittest.TestCase):
         ]
         inference = SimpleNamespace(
             _should_use_smart_split=lambda: False,
-            _prepare_transcription=lambda path, batched: ("AUDIO", {"language": "ja"}, None),
+            _prepare_transcription=lambda path, batched, overrides=None: ("AUDIO", {"language": "ja"}, None),
             segment_merge_options=MERGE_OPTIONS,
         )
         model = SimpleNamespace(
@@ -383,7 +463,7 @@ class TranscriptionServiceTest(unittest.TestCase):
 
         inference = SimpleNamespace(
             _should_use_smart_split=lambda: False,
-            _prepare_transcription=lambda path, batched: (np.zeros(16_000 * 7), {}, 0),
+            _prepare_transcription=lambda path, batched, overrides=None: (np.zeros(16_000 * 7), {}, 0),
             segment_merge_options=MERGE_OPTIONS,
         )
         service = bare_service(inference, SimpleNamespace(transcribe=must_not_run))
@@ -396,7 +476,7 @@ class TranscriptionServiceTest(unittest.TestCase):
         duplicates = [Segment(0, 1_000, "same"), Segment(1_000, 2_000, "same"), Segment(30_000, 31_000, "other")]
         inference = SimpleNamespace(
             _should_use_smart_split=lambda: True,
-            _transcribe_smart_chunks=lambda model, task: (
+            _transcribe_smart_chunks=lambda model, task, overrides=None: (
                 list(duplicates),
                 SimpleNamespace(duration=40.0, duration_after_vad=3.0),
             ),
@@ -411,7 +491,7 @@ class TranscriptionServiceTest(unittest.TestCase):
         in_flight = []
         guard = threading.Lock()
 
-        def slow_chunks(model, task):
+        def slow_chunks(model, task, overrides=None):
             with guard:
                 in_flight.append(1)
                 self.assertEqual(len(in_flight), 1, "two transcriptions ran concurrently")

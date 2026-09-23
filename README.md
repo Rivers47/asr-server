@@ -35,8 +35,31 @@ curl http://127.0.0.1:8000/health
 | `GET` | `/health` | liveness plus the loaded configuration |
 | `POST` | `/transcribe` | audio in, transcript out |
 
-`format` accepts `json` (default), `srt`, `vtt`, `lrc`, `txt`. A raw-body upload
-can name itself with an `X-Filename` header so the container extension survives.
+### Query parameters
+
+| | values | default |
+|---|---|---|
+| `format` | `json`, `srt`, `vtt`, `lrc`, `txt` | `json` |
+| `hotwords` | comma-separated words, up to 1024 chars | from the config file |
+| `beam_size` | 1–10 | from the config file |
+
+`hotwords` biases the decoder toward particular spellings — the lever for proper
+nouns and homophones the model would otherwise render with its broadcast-corpus
+prior. An explicit empty value clears whatever the config set. `beam_size` trades
+runtime for accuracy on homophones; 1 is greedy, 5 is Whisper's own default.
+Everything else — language, task, VAD parameters, chunking — is process-wide.
+
+```bash
+curl -X POST --data-binary @track.opus \
+     "http://127.0.0.1:8000/transcribe?hotwords=%E6%9F%9A%E5%A7%AB,%E7%88%B6%E3%81%95%E3%81%BE&beam_size=5"
+```
+
+Both are echoed in the JSON response so a caller can confirm what applied, and
+logged alongside the request. Malformed values are rejected before the upload is
+read, so a bad `beam_size` never costs you a 2 GB transfer.
+
+A raw-body upload can name itself with an `X-Filename` header so the container
+extension survives.
 
 ```json
 {
@@ -46,6 +69,8 @@ can name itself with an `X-Filename` header so the container extension survives.
   "duration_after_vad": 6.25,
   "language": "ja",
   "task": "transcribe",
+  "hotwords": "柚姫",
+  "beam_size": 5,
   "processing_time": 8.1
 }
 ```
@@ -80,9 +105,9 @@ boundary acoustically, ahead of decoding, breaks that loop, and a per-chunk
 [faster-whisper `transcribe()`](https://github.com/SYSTRAN/faster-whisper/blob/master/faster_whisper/transcribe.py)
 parameter is accepted. The flags on `serve.py --help` override the file.
 
-`hotwords` ships empty. It is the lever for proper nouns and homophones the model
-would otherwise render with its broadcast-corpus prior — set it per work, e.g.
-`"hotwords": "柚姫, 父さま"`.
+`hotwords` ships empty, since the server takes arbitrary uploads. Set it in the
+config as a process-wide default (`"hotwords": "柚姫, 父さま"`), or per request
+with the `hotwords` query parameter.
 
 ## Why the dependency list is short
 

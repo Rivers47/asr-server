@@ -30,7 +30,7 @@
         // 太大会导致漏翻, 太小可能会导致时间轴不准或文本质量下降(幻听)
         // VAD detection threshold (0.3-0.7, recommended 0.5)
         // Too high will cause missed translations, too low may cause timeline inaccuracy or text quality degradation (hallucinations)
-        "threshold": 0.4,
+        "threshold": 0.5,
 
         // 最小语音持续时间 (毫秒)
         // Minimum speech duration (milliseconds)

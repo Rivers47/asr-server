@@ -693,8 +693,12 @@ class Inference:
         self.vad_injected = True
         logger.info(f"✓ Enhanced VAD activated (threshold={vad_config.threshold})")
 
-    def _prepare_transcription(self, audio_path: str, *, batched: bool) -> tuple[Any, dict[str, Any], float | None]:
+    def _prepare_transcription(
+        self, audio_path: str, *, batched: bool, overrides: dict[str, Any] | None = None
+    ) -> tuple[Any, dict[str, Any], float | None]:
         config = dict(self.generation_config)
+        if overrides:
+            config.update(overrides)
 
         if self.smart_split_options.enabled or not config.get("vad_filter") or "clip_timestamps" in config:
             return audio_path, config, None
@@ -755,10 +759,14 @@ class Inference:
 
         return audio, chunks, duration_after_vad
 
-    def _transcribe_smart_chunks(self, model, task: InferenceTask) -> tuple[list[Segment], Any]:
+    def _transcribe_smart_chunks(
+        self, model, task: InferenceTask, overrides: dict[str, Any] | None = None
+    ) -> tuple[list[Segment], Any]:
         audio, chunks, outer_duration_after_vad = self._plan_smart_chunks(task.audio_path)
         duration = len(audio) / WHISPER_SAMPLING_RATE
         config = dict(self.generation_config)
+        if overrides:
+            config.update(overrides)
         config.pop("clip_timestamps", None)
         config["vad_filter"] = bool(config.get("vad_filter", True))
         config.setdefault("beam_size", 1)
