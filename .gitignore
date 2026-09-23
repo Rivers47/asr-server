@@ -10,3 +10,14 @@ __pycache__/
 
 # editor swap files
 *.swp
+
+# audio and transcripts that accumulate while testing
+*.wav
+*.mp3
+*.opus
+*.flac
+*.webm
+*.mp4
+*.srt
+*.vtt
+*.lrc
