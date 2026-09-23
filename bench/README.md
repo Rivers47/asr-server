@@ -159,9 +159,33 @@ An empty task registry. In optimum 2.x the exporters moved into separate
 packages (`optimum-onnx`, `optimum-intel`) and the registry the backend is meant
 to populate is coming up empty. Downgrading transformers to 4.57.6 did not help.
 
-If you need OpenVINO, try the last 1.x pair (`optimum-intel~=1.27`, which pairs
-with `optimum` 1.x) before spending time elsewhere. Otherwise **start with
-`torch-xpu`** — it needs no conversion at all and so cannot hit any of this.
+Minimal repro — no export, no model weights, just the config:
+
+```python
+from optimum.exporters.openvino.model_configs import WhisperOpenVINOConfig
+from transformers import AutoConfig
+
+cfg = AutoConfig.from_pretrained("efwkjn/whisper-ja-1.5B")
+WhisperOpenVINOConfig(cfg, task="automatic-speech-recognition")
+# TypeError: NormalizedConfig.__init__() got multiple values for argument 'allow_new'
+```
+
+`WhisperOpenVINOConfig.NORMALIZED_CONFIG_CLASS(cfg)` succeeds on its own, so the
+partial that `WhisperOnnxConfig` binds `allow_new=True` into is being applied
+twice somewhere in construction. Reproduced on:
+
+| optimum | optimum-intel | transformers | result |
+|---|---|---|---|
+| 2.3.0 | 2.2.0 | 5.5.4 | fails |
+| 2.3.0 | 2.2.0 | 4.57.6 | fails |
+| 2.1.0 | 1.27.0 | 4.57.6 | fails |
+
+Both the `optimum-cli` and in-process `export=True` paths fail identically, so
+there is no conversion route through optimum on these versions.
+
+**Start with `torch-xpu` instead.** It needs no conversion at all — it runs the
+published safetensors directly — so it cannot hit any of this. Only come back to
+OpenVINO if torch-XPU is too slow and you have appetite for version archaeology.
 
 ## Reference numbers
 
