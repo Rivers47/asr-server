@@ -149,19 +149,33 @@ Measured here on 16 cores, 30 s of audio at beam 5:
 | 8 | half the budget — **this default** | 3.34× |
 | 16 | all cores | 1.08× |
 
-Scaling turns over well before the core count: using every core was 2.2× *slower*
-than using four. So the default is half the CPU budget — `sched_getaffinity`
-intersected with the cgroup quota, the same measurement the VAD uses — which is
-both faster than CTranslate2's default and safe under a container CPU limit.
+Using every core was 2.2× *slower* than using four — but that is a property of
+the measuring host, not of CTranslate2. The same box scales like this on pure
+Python busy-loops, with no ASR involved:
 
-**The turnover point is machine-specific.** The box these numbers come from is a
-shared VM, and yours will differ. Benchmark `--cpu_threads` on the host that
-matters before trusting the default:
+| processes | throughput vs 1 | parallel efficiency |
+|---|---|---|
+| 4 | 3.94× | 99% |
+| 8 | 6.53× | 82% |
+| 16 | 8.16× | 51% |
+
+It advertises 16 vCPUs and delivers about 8 cores of real throughput, so 16
+threads are 2× oversubscribed and thrash. CTranslate2 was tracking the hardware
+faithfully.
+
+So the default is half the CPU budget — `sched_getaffinity` intersected with the
+cgroup quota, the same measurement the VAD uses. It beat CTranslate2's default of
+4 on every configuration measured, and it degrades gracefully on oversubscribed
+hosts, which is what containers usually land on.
+
+**On dedicated hardware the full core count may well be faster.** Nothing here
+shows a ceiling intrinsic to CTranslate2 — only this host's. Measure before
+trusting either default:
 
 ```bash
-for n in 4 8 16; do
-  python serve.py --cpu_threads $n &   # then time one request, or use bench/
-done
+python bench/bench_backends.py your-audio.opus --backends ct2-cpu --limit 3
+# then repeat with CT2_THREADS varied, or time requests against
+# `python serve.py --cpu_threads N` at 4, 8, and your core count
 ```
 
 `/health` reports the resolved value.

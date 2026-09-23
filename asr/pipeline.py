@@ -460,13 +460,12 @@ class Inference:
         self.vad_manager = None
         self.vad_threads = max(0, args.vad_threads or 0)  # 0 = derive from the CPU budget
         # CTranslate2's own default is 4 threads regardless of machine size, which
-        # leaves a big box idle. Measured on 16 cores, 30 s of audio at beam 5:
-        #   4 threads  2.39x realtime   (CTranslate2's default)
-        #   8 threads  3.34x realtime   (half the budget -- this default)
-        #  16 threads  1.08x realtime   (all cores: 2.2x SLOWER than the default)
-        # Scaling turns over well before the core count, so half the budget is the
-        # default rather than all of it. The turnover point is machine-specific --
-        # benchmark --cpu_threads on the host that matters before trusting it.
+        # leaves a large host idle. Half the budget is the default here instead:
+        # it beat 4 threads on every machine measured, and it degrades gracefully
+        # on hosts that advertise more vCPUs than they can actually deliver --
+        # where asking for every core collapses throughput rather than raising it.
+        # Dedicated hardware may well prefer the full count; see README, and
+        # benchmark --cpu_threads on the host that matters.
         self.cpu_threads = max(0, args.cpu_threads or 0) or max(1, available_cpus() // 2)
         self.vad_force_cpu = bool(args.vad_force_cpu)
         self.device = (args.device or "auto").strip().lower()
