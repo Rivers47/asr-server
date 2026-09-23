@@ -194,7 +194,12 @@ differ:
 
 | backend | load | decode | realtime | peak RSS |
 |---|---|---|---|---|
-| `ct2-cpu` (int8, beam 5) | 7.2 s | 54.2 s | 1.65× | 3049 MB |
+| `ct2-cpu` (int8, beam 5, 8 threads) | 5.8 s | 39.6 s | 2.25× | 3048 MB |
 
-89 s of VAD-selected audio across 3 chunks, 16 cores. Anything under roughly 2×
-this is not worth a backend rewrite.
+89 s of VAD-selected audio across 3 chunks, on 8 physical / 16 logical cores.
+
+**Sweep `--cpu-threads` before comparing anything.** On this host the CPU
+baseline ranges from 1.08× to 3.38× depending on thread count alone, with a
+45% cliff one thread past the physical core count — a wider spread than most
+backend changes would buy. Benchmarking a GPU backend against a mis-tuned CPU
+baseline will tell you whatever you want to hear.

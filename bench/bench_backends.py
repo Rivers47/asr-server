@@ -160,7 +160,16 @@ def run_ct2(chunks: list[np.ndarray], device: str, args) -> tuple[float, list[st
     from faster_whisper import WhisperModel
 
     started = time.perf_counter()
-    model = WhisperModel(args.ct2_model, device=device, compute_type=args.compute_type)
+    model = WhisperModel(
+        args.ct2_model,
+        device=device,
+        compute_type=args.compute_type,
+        # Match the server, which defaults to half the logical count -- the
+        # physical core count under SMT. CTranslate2's own default is 4 threads
+        # regardless of machine size, which would understate the baseline.
+        cpu_threads=args.cpu_threads or max(1, (os.cpu_count() or 2) // 2),
+        num_workers=1,
+    )
     load_s = time.perf_counter() - started
 
     def decode(audio: np.ndarray) -> str:
@@ -356,6 +365,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--hf-model", default="efwkjn/whisper-ja-1.5B", help="HF model for torch/OpenVINO")
     parser.add_argument("--ov-model", default=None, help="pre-exported OpenVINO IR directory (skips on-the-fly export)")
     parser.add_argument("--compute-type", default="int8", help="CTranslate2 compute type (default: int8)")
+    parser.add_argument(
+        "--cpu-threads",
+        type=int,
+        default=0,
+        help="CTranslate2 CPU threads; 0 (default) matches the server -- half the logical count. "
+        "The curve is steep on both sides of the physical core count, so sweep this before comparing backends.",
+    )
     parser.add_argument("--language", default="ja")
     parser.add_argument("--beam-size", type=int, default=5)
     parser.add_argument("--window", type=float, default=30.0, help="chunk length in seconds (default: 30)")
@@ -438,6 +454,7 @@ def main(argv: list[str] | None = None) -> int:
                 "--ct2-model", args.ct2_model,
                 "--hf-model", args.hf_model,
                 "--compute-type", args.compute_type,
+                "--cpu-threads", str(args.cpu_threads),
                 "--language", args.language,
                 "--beam-size", str(args.beam_size),
             ]  # fmt: skip
