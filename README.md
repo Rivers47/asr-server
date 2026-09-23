@@ -80,11 +80,41 @@ driven through process-global state. Requests past `--max_queue` (default 8) get
 a `503`; uploads past `--max_upload_mb` (default 2048) get a `400`. Health checks
 answer immediately regardless.
 
+## Containers
+
+```bash
+docker compose run --rm fetch      # populate ./models once (~3 GB)
+docker compose up asr              # CPU
+docker compose --profile gpu up asr-gpu
+```
+
+Or directly:
+
+```bash
+docker build -t asmr-asr .
+docker run --rm -v "$PWD/models:/srv/models" -p 127.0.0.1:8000:8000 asmr-asr
+```
+
+Weights are a mounted volume, not image content — they are 3 GB and version
+independently of the code. The dependency layer is separate from the source
+layer, so editing `asr/` rebuilds in seconds.
+
+`Dockerfile.gpu` puts the ASR model on CUDA and leaves the VAD on CPU, since the
+VAD is a 114 MB graph run once per 30 s chunk and `onnxruntime-gpu` costs about
+2 GB of CUDA wheels. Build with `--build-arg VAD_ON_GPU=1` to move it too.
+
+> **The GPU image is unverified** — it has not been built or run. CTranslate2
+> also needs compute capability 7.0+ for float16 and 8.0+ for bfloat16, so check
+> `nvidia-smi --query-gpu=compute_cap --format=csv` before assuming your card
+> works. The CPU image is the tested path.
+
+The compose file binds to `127.0.0.1` only. There is no authentication.
+
 ## How it works
 
 1. **Decode** — ffmpeg via `av`, to 16 kHz mono
 2. **VAD** — `whisper_vad.onnx`, a whisper-base encoder plus 2 decoder layers,
-   emitting a speech probability every 20 ms
+   emitting a speech probability every 20 ms, run under ONNX Runtime
 3. **Chunk** — boundaries chosen inside the longest silence in the last 40 % of
    each 30 s window, never mid-utterance
 4. **Transcribe** — one `model.transcribe()` per chunk, with the VAD running
@@ -108,6 +138,19 @@ parameter is accepted. The flags on `serve.py --help` override the file.
 `hotwords` ships empty, since the server takes arbitrary uploads. Set it in the
 config as a process-wide default (`"hotwords": "柚姫, 父さま"`), or per request
 with the `hotwords` query parameter.
+
+### VAD runtime
+
+The VAD runs under ONNX Runtime, on the `CUDAExecutionProvider` when one is
+available and `CPUExecutionProvider` otherwise. `pyproject.toml` declares plain
+`onnxruntime`, so by default it is CPU even when the ASR model is on CUDA.
+`/health` reports which, as `vad_device`.
+
+`--vad_threads` defaults to half the CPU budget. That budget comes from
+`sched_getaffinity` intersected with the cgroup CPU quota, not `os.cpu_count()`
+— inside a container the host's core count is the wrong number, and
+oversubscribing a quota trades throughput for scheduler contention. Pass a
+number to override, or `--vad_force_cpu` to pin it to CPU regardless.
 
 ## Why the dependency list is short
 

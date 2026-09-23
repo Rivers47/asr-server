@@ -5,6 +5,7 @@ VAD Model Manager - Manages different VAD model implementations
 import json
 import logging
 import os
+import pathlib
 import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -13,6 +14,45 @@ from typing import Any, Protocol
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+
+def available_cpus(cgroup_root: str | pathlib.Path = "/sys/fs/cgroup") -> int:
+    """CPUs this process may actually use.
+
+    ``os.cpu_count()`` reports the host's cores, which inside a container is
+    usually wrong in both directions: a cpuset restricts which cores are
+    visible, and a CFS quota caps how much CPU time is available regardless of
+    how many cores are. Oversubscribing ONNX Runtime against a quota trades
+    throughput for scheduler contention, so take the smallest real limit.
+
+    ``cgroup_root`` exists so the quota branches are testable.
+    """
+    try:
+        budget = len(os.sched_getaffinity(0))  # respects cpuset, Linux only
+    except (AttributeError, OSError):
+        budget = os.cpu_count() or 1
+
+    root = pathlib.Path(cgroup_root)
+
+    # cgroup v2: "<quota> <period>", or "max <period>" when unlimited.
+    try:
+        quota_us, period_us = root.joinpath("cpu.max").read_text().split()
+        if quota_us != "max":
+            return max(1, min(budget, int(int(quota_us) / int(period_us))))
+        return max(1, budget)
+    except (OSError, ValueError):
+        pass
+
+    # cgroup v1: quota and period in separate files, -1 when unlimited.
+    try:
+        quota = int(root.joinpath("cpu/cpu.cfs_quota_us").read_text())
+        period = int(root.joinpath("cpu/cpu.cfs_period_us").read_text())
+        if quota > 0 and period > 0:
+            return max(1, min(budget, int(quota / period)))
+    except (OSError, ValueError):
+        pass
+
+    return max(1, budget)
 
 
 @dataclass
@@ -37,7 +77,7 @@ class VadConfig:
     frame_duration_ms: int = 20
     chunk_duration_ms: int = 30000
     force_cpu: bool = False
-    num_threads: int = 1
+    num_threads: int = 0  # 0 = derive from the CPU budget
 
 
 class VadModel(Protocol):
@@ -56,7 +96,7 @@ class WhisperVADOnnxWrapper:
         model_path: str,
         metadata_path: str | None = None,
         force_cpu: bool = False,
-        num_threads: int = 1,
+        num_threads: int = 0,
         progress_callback: Callable[[int, int, str], None] | None = None,
     ):
         """Initialize ONNX model wrapper.
@@ -65,7 +105,7 @@ class WhisperVADOnnxWrapper:
             model_path: Path to ONNX model file
             metadata_path: Path to metadata JSON file (optional)
             force_cpu: Force CPU execution even if GPU is available
-            num_threads: Number of CPU threads for inference
+            num_threads: CPU threads for inference; 0 derives it from the CPU budget
             progress_callback: Optional callback for progress tracking (chunk_idx, total_chunks, device)
         """
         try:
@@ -122,29 +162,25 @@ class WhisperVADOnnxWrapper:
         providers = ["CPUExecutionProvider"]
         use_gpu = not force_cpu and "CUDAExecutionProvider" in ort.get_available_providers()
 
+        if num_threads > 0:
+            threads = num_threads
+            source = "configured"
+        else:
+            # Half the budget by default: the ASR model is running on the other
+            # half, and the two alternate rather than overlap.
+            budget = available_cpus()
+            threads = max(1, budget // 2)
+            source = f"auto, half of {budget} available"
+
+        opts.inter_op_num_threads = threads
+        opts.intra_op_num_threads = threads
+
         if use_gpu:
             providers.insert(0, "CUDAExecutionProvider")
             self.device = "GPU (CUDA)"
-            # For GPU, use the provided num_threads or default
-            opts.inter_op_num_threads = num_threads
-            opts.intra_op_num_threads = num_threads
         else:
             self.device = "CPU"
-            # For CPU, use half of available processors if num_threads is default (1)
-            import multiprocessing
-
-            if num_threads == 1:
-                # Use half of CPU count for optimal performance
-                optimal_threads = max(1, multiprocessing.cpu_count() // 2)
-                opts.inter_op_num_threads = optimal_threads
-                opts.intra_op_num_threads = optimal_threads
-                logger.info(
-                    f"Auto-configured ONNX to use {optimal_threads} CPU threads (half of {multiprocessing.cpu_count()} available)"
-                )
-            else:
-                # Use user-specified thread count
-                opts.inter_op_num_threads = num_threads
-                opts.intra_op_num_threads = num_threads
+        logger.info(f"VAD ONNX threads: {threads} ({source})")
 
         self.session = ort.InferenceSession(model_path, providers=providers, sess_options=opts)
 

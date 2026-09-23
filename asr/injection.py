@@ -3,6 +3,7 @@ VAD Injection System - Redirects faster_whisper VAD calls to custom implementati
 Provides transparent switching between custom VAD models
 """
 
+import dataclasses
 import logging
 import unittest.mock as mock
 from collections.abc import Callable
@@ -20,6 +21,11 @@ _injection_active = False
 _active_patches: list[Any] = []
 _global_config = None
 _global_progress_callback = None
+# One VadModelManager -- and so one ONNX session -- for the whole process.
+# Building it costs ~0.2-0.3 s and ~114 MB, and the inner VAD runs once per
+# audio chunk, so rebuilding per call would dominate long files.
+_manager: VadModelManager | None = None
+_manager_key: tuple[Any, ...] | None = None
 
 
 @dataclass
@@ -52,6 +58,29 @@ def get_global_config() -> VadConfig:
     return _global_config
 
 
+def get_active_manager(config: VadConfig | None = None, progress_callback: Callable | None = None) -> VadModelManager:
+    """Return the process-wide VAD manager, building it on first use.
+
+    Rebuilt only if the config or progress callback actually changes, which in
+    practice means never after startup.
+    """
+    global _manager, _manager_key
+
+    config = config or get_global_config()
+    key = (dataclasses.astuple(config), progress_callback)
+    if _manager is None or _manager_key != key:
+        _manager = VadModelManager(config=config, ttl=config.ttl, progress_callback=progress_callback)
+        _manager_key = key
+    return _manager
+
+
+def reset_manager() -> None:
+    """Drop the cached manager, releasing its ONNX session."""
+    global _manager, _manager_key
+    _manager = None
+    _manager_key = None
+
+
 def get_speech_timestamps_injected(
     audio: np.ndarray, vad_options: Any = None, sampling_rate: int = 16000, **kwargs
 ) -> list[dict[str, Any]]:
@@ -70,8 +99,7 @@ def get_speech_timestamps_injected(
     # Check if a progress callback was provided (from kwargs or global)
     progress_callback = kwargs.get("progress_callback") or _global_progress_callback
 
-    # Create manager (this uses cached instances internally)
-    manager = VadModelManager(config=config, ttl=config.ttl, progress_callback=progress_callback)
+    manager = get_active_manager(config, progress_callback)
 
     # Extract options from vad_options (works with both real and mock VadOptions)
     if vad_options is not None:
@@ -204,4 +232,5 @@ def uninject_vad() -> None:
     _active_patches.clear()
     _injection_active = False
     _global_progress_callback = None  # Clear the progress callback
+    reset_manager()  # release the ONNX session
     logger.info("VAD injection deactivated")

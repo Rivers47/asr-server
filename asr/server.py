@@ -575,6 +575,17 @@ def build_parser() -> argparse.ArgumentParser:
     vad.add_argument("--vad_min_speech_duration_ms", type=int, default=None, help="Shortest kept speech run")
     vad.add_argument("--vad_min_silence_duration_ms", type=int, default=None, help="Silence needed to split speech")
     vad.add_argument("--vad_speech_pad_ms", type=int, default=None, help="Padding added around speech")
+    vad.add_argument(
+        "--vad_threads",
+        type=int,
+        default=0,
+        help="ONNX threads for the VAD; 0 (default) uses half the container's CPU budget",
+    )
+    vad.add_argument(
+        "--vad_force_cpu",
+        action="store_true",
+        help="Run the VAD on CPU even when a CUDA execution provider is available",
+    )
 
     chunking = parser.add_argument_group("chunking and subtitle merge overrides")
     chunking.add_argument(

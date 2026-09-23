@@ -34,8 +34,8 @@ except Exception as e:
     ctranslate2 = None
 
 # Import our VAD injection system
-from .injection import inject_vad
-from .vad_manager import VadConfig, VadModelManager
+from .injection import get_active_manager, inject_vad
+from .vad_manager import VadConfig
 
 
 def format_duration(seconds: float) -> str:
@@ -458,6 +458,8 @@ class Inference:
         self.model_name_or_path = args.model_name_or_path
         self.vad_injected = False
         self.vad_manager = None
+        self.vad_threads = max(0, args.vad_threads or 0)  # 0 = derive from the CPU budget
+        self.vad_force_cpu = bool(args.vad_force_cpu)
         self.device = (args.device or "auto").strip().lower()
         if self.device in {"amd", "rocm", "hip"}:
             # CTranslate2 HIP backend still uses the public device name "cuda".
@@ -675,21 +677,18 @@ class Inference:
             vad_config.frame_duration_ms = 20
             vad_config.chunk_duration_ms = 30000
 
-        # Hardcoded runtime configuration
-        vad_config.force_cpu = False
-        vad_config.num_threads = 8
+        vad_config.force_cpu = self.vad_force_cpu
+        vad_config.num_threads = self.vad_threads
 
-        # Inject VAD with progress callback
-        self.vad_manager = VadModelManager(
-            config=vad_config,
-            ttl=vad_config.ttl,
-            progress_callback=self._vad_progress_callback,
-        )
         inject_vad(
             model_id=vad_model,
             config=vad_config,
             progress_callback=self._vad_progress_callback,
         )
+        # Both VAD passes -- the outer boundary planner and faster-whisper's
+        # injected internal filter -- share this one manager, so there is a
+        # single ONNX session per process.
+        self.vad_manager = get_active_manager(vad_config, self._vad_progress_callback)
         self.vad_injected = True
         logger.info(f"✓ Enhanced VAD activated (threshold={vad_config.threshold})")
 

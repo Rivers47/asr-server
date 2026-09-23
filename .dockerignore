@@ -1,0 +1,26 @@
+# 3 GB of weights: a mounted volume, never image content.
+models/
+
+.git/
+.venv/
+.mypy_cache/
+.ruff_cache/
+__pycache__/
+*.py[cod]
+*.log
+*.swp
+
+# Audio and transcripts that accumulate in a working tree
+*.wav
+*.mp3
+*.opus
+*.flac
+*.webm
+*.mp4
+*.srt
+*.vtt
+*.lrc
+
+Dockerfile*
+docker-compose.yml
+.dockerignore
