@@ -35,7 +35,7 @@ except Exception as e:
 
 # Import our VAD injection system
 from .injection import get_active_manager, inject_vad
-from .vad_manager import VadConfig
+from .vad_manager import VadConfig, available_cpus
 
 
 def format_duration(seconds: float) -> str:
@@ -459,6 +459,15 @@ class Inference:
         self.vad_injected = False
         self.vad_manager = None
         self.vad_threads = max(0, args.vad_threads or 0)  # 0 = derive from the CPU budget
+        # CTranslate2's own default is 4 threads regardless of machine size, which
+        # leaves a big box idle. Measured on 16 cores, 30 s of audio at beam 5:
+        #   4 threads  2.39x realtime   (CTranslate2's default)
+        #   8 threads  3.34x realtime   (half the budget -- this default)
+        #  16 threads  1.08x realtime   (all cores: 2.2x SLOWER than the default)
+        # Scaling turns over well before the core count, so half the budget is the
+        # default rather than all of it. The turnover point is machine-specific --
+        # benchmark --cpu_threads on the host that matters before trusting it.
+        self.cpu_threads = max(0, args.cpu_threads or 0) or max(1, available_cpus() // 2)
         self.vad_force_cpu = bool(args.vad_force_cpu)
         self.device = (args.device or "auto").strip().lower()
         if self.device in {"amd", "rocm", "hip"}:

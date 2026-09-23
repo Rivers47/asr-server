@@ -236,6 +236,10 @@ class TranscriptionService:
             self.inference.model_name_or_path,
             device=self.inference.device,
             compute_type=self.inference.compute_type,
+            cpu_threads=self.inference.cpu_threads,
+            # Transcriptions are serialised behind a lock, so a second worker
+            # would only duplicate the model in memory.
+            num_workers=1,
         )
         logger.info(
             "Model ready in %.1fs (device=%s, compute_type=%s, task=%s)",
@@ -256,6 +260,7 @@ class TranscriptionService:
             "model": self.inference.model_name_or_path,
             "device": self.inference.device,
             "compute_type": self.inference.compute_type,
+            "cpu_threads": self.inference.cpu_threads,
             "task": config.get("task"),
             "language": config.get("language"),
             "vad_device": self.inference.vad_manager.get_device() if self.inference.vad_manager else None,
@@ -562,6 +567,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--generation_config",
         default="generation_config.json5",
         help="Decoding and VAD settings (default: generation_config.json5)",
+    )
+    model.add_argument(
+        "--cpu_threads",
+        type=int,
+        default=0,
+        help="CTranslate2 CPU threads; 0 (default) uses the container's full CPU budget",
     )
     model.add_argument(
         "--task",

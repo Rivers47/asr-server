@@ -135,6 +135,37 @@ parameter is accepted. The flags on `serve.py --help` override the file.
 config as a process-wide default (`"hotwords": "柚姫, 父さま"`), or per request
 with the `hotwords` query parameter.
 
+### CPU threads
+
+`--cpu_threads` sets CTranslate2's thread count for the ASR model, where nearly
+all the compute goes. CTranslate2's own default is **4 threads regardless of
+machine size**, which leaves a large box mostly idle.
+
+Measured here on 16 cores, 30 s of audio at beam 5:
+
+| `cpu_threads` | | realtime factor |
+|---|---|---|
+| 4 | CTranslate2's default | 2.39× |
+| 8 | half the budget — **this default** | 3.34× |
+| 16 | all cores | 1.08× |
+
+Scaling turns over well before the core count: using every core was 2.2× *slower*
+than using four. So the default is half the CPU budget — `sched_getaffinity`
+intersected with the cgroup quota, the same measurement the VAD uses — which is
+both faster than CTranslate2's default and safe under a container CPU limit.
+
+**The turnover point is machine-specific.** The box these numbers come from is a
+shared VM, and yours will differ. Benchmark `--cpu_threads` on the host that
+matters before trusting the default:
+
+```bash
+for n in 4 8 16; do
+  python serve.py --cpu_threads $n &   # then time one request, or use bench/
+done
+```
+
+`/health` reports the resolved value.
+
 ### VAD runtime
 
 The VAD runs under ONNX Runtime, on the `CUDAExecutionProvider` when one is
@@ -142,11 +173,8 @@ available and `CPUExecutionProvider` otherwise. `pyproject.toml` declares plain
 `onnxruntime`, so by default it is CPU even when the ASR model is on CUDA.
 `/health` reports which, as `vad_device`.
 
-`--vad_threads` defaults to half the CPU budget. That budget comes from
-`sched_getaffinity` intersected with the cgroup CPU quota, not `os.cpu_count()`
-— inside a container the host's core count is the wrong number, and
-oversubscribing a quota trades throughput for scheduler contention. Pass a
-number to override, or `--vad_force_cpu` to pin it to CPU regardless.
+`--vad_threads` defaults to half the CPU budget, inherited from upstream. Pass a
+number to override, or `--vad_force_cpu` to pin the provider to CPU regardless.
 
 ## Why the dependency list is short
 

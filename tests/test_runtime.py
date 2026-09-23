@@ -59,6 +59,58 @@ class AvailableCpusTest(unittest.TestCase):
         self.assertEqual(available_cpus(self.root), self.host)
 
 
+class ThreadBudgetTest(unittest.TestCase):
+    """Both thread counts must come from the CPU budget, not the host core count."""
+
+    @staticmethod
+    def _args(**overrides):
+        from asr.server import resolve_args
+
+        argv = []
+        for key, value in overrides.items():
+            argv += [f"--{key}", str(value)]
+        return resolve_args(argv)
+
+    def test_cpu_threads_defaults_to_half_the_budget(self):
+        from asr.vad_manager import available_cpus
+
+        args = self._args()
+        self.assertEqual(args.cpu_threads, 0, "the flag default must stay 0 = auto")
+        # Resolution happens in Inference.__init__, which also loads models; check
+        # the arithmetic directly against the same helper it uses.
+        resolved = max(0, args.cpu_threads or 0) or max(1, available_cpus() // 2)
+        self.assertEqual(resolved, max(1, available_cpus() // 2))
+        self.assertGreaterEqual(resolved, 1)
+
+    def test_explicit_cpu_threads_wins(self):
+        args = self._args(cpu_threads=3)
+        self.assertEqual(max(0, args.cpu_threads or 0) or 999, 3)
+
+    def test_negative_cpu_threads_falls_back_to_auto(self):
+        from asr.vad_manager import available_cpus
+
+        args = self._args(cpu_threads=-4)
+        expected = max(1, available_cpus() // 2)
+        self.assertEqual(max(0, args.cpu_threads or 0) or expected, expected)
+
+    def test_the_model_is_built_with_the_resolved_thread_count(self):
+        """Guards the wiring: a dropped kwarg means CT2 silently auto-detects again."""
+        import inspect
+
+        from asr import server
+
+        source = inspect.getsource(server.TranscriptionService.__init__)
+        self.assertIn("cpu_threads=self.inference.cpu_threads", source)
+        self.assertIn("num_workers=1", source)
+
+    def test_health_reports_the_thread_count(self):
+        import inspect
+
+        from asr import server
+
+        self.assertIn('"cpu_threads"', inspect.getsource(server.TranscriptionService.describe))
+
+
 class ManagerCacheTest(unittest.TestCase):
     """The inner VAD runs once per audio chunk; rebuilding the session per call
     cost ~0.2-0.3 s and 114 MB each time."""

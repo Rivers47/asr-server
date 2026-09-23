@@ -59,6 +59,6 @@ EXPOSE 8000
 # 0.0.0.0 because the container's loopback is unreachable from the host. Publish
 # the port only where you want it reachable -- there is no authentication.
 #
-# --vad_threads is omitted deliberately: its default reads the cgroup CPU quota,
-# so `--cpus 2` gives the VAD 1 thread without being told.
+# --cpu_threads and --vad_threads are omitted deliberately: both defaults read
+# the cgroup CPU quota, so `--cpus 2` sizes them correctly without being told.
 CMD ["python", "serve.py", "--host", "0.0.0.0", "--port", "8000"]
