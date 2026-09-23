@@ -572,7 +572,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--cpu_threads",
         type=int,
         default=0,
-        help="CTranslate2 CPU threads; 0 (default) uses the container's full CPU budget",
+        help="CTranslate2 CPU threads; 0 (default) uses half the CPU budget, which is the "
+        "physical core count under SMT. Pass the real core count if SMT is off.",
     )
     model.add_argument(
         "--task",
@@ -590,7 +591,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--vad_threads",
         type=int,
         default=0,
-        help="ONNX threads for the VAD; 0 (default) uses half the container's CPU budget",
+        help="ONNX threads for the VAD; 0 (default) uses half the CPU budget",
     )
     vad.add_argument(
         "--vad_force_cpu",
