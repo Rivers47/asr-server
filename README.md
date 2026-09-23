@@ -80,35 +80,31 @@ driven through process-global state. Requests past `--max_queue` (default 8) get
 a `503`; uploads past `--max_upload_mb` (default 2048) get a `400`. Health checks
 answer immediately regardless.
 
-## Containers
+## Container
 
 ```bash
-docker compose run --rm fetch      # populate ./models once (~3 GB)
-docker compose up asr              # CPU
-docker compose --profile gpu up asr-gpu
+podman build -t asmr-asr --format oci -f containerfile .
+podman run --rm -v ./models:/srv/models:Z asmr-asr python fetch_models.py   # once
+podman run --rm -v ./models:/srv/models:ro,Z -p 127.0.0.1:8000:8000 asmr-asr
 ```
 
-Or directly:
+`docker build -f containerfile .` works too. Only OCI-spec instructions are
+used, so `--format oci` drops nothing — which is why there is no `HEALTHCHECK`
+(a Docker config extension the OCI image spec does not define). Probe
+`GET /health` from the orchestrator instead.
 
-```bash
-docker build -t asmr-asr .
-docker run --rm -v "$PWD/models:/srv/models" -p 127.0.0.1:8000:8000 asmr-asr
-```
-
-Weights are a mounted volume, not image content — they are 3 GB and version
+Weights are a bind mount rather than image content: 3 GB that versions
 independently of the code. The dependency layer is separate from the source
 layer, so editing `asr/` rebuilds in seconds.
 
-`Dockerfile.gpu` puts the ASR model on CUDA and leaves the VAD on CPU, since the
-VAD is a 114 MB graph run once per 30 s chunk and `onnxruntime-gpu` costs about
-2 GB of CUDA wheels. Build with `--build-arg VAD_ON_GPU=1` to move it too.
+The image runs as uid 10001 and binds `0.0.0.0` inside the container — publish
+the port only where you want it reachable, since there is no authentication.
+`--vad_threads` is left at its default on purpose: it reads the cgroup quota, so
+`--cpus 2` gives the VAD one thread without being told.
 
-> **The GPU image is unverified** — it has not been built or run. CTranslate2
-> also needs compute capability 7.0+ for float16 and 8.0+ for bfloat16, so check
-> `nvidia-smi --query-gpu=compute_cap --format=csv` before assuming your card
-> works. The CPU image is the tested path.
-
-The compose file binds to `127.0.0.1` only. There is no authentication.
+> Unbuilt — there is no container runtime in the environment this was written
+> in, so `uv sync --frozen` under `package = false` and the `libgomp1` dependency
+> are reasoned, not verified.
 
 ## How it works
 
