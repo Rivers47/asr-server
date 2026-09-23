@@ -139,43 +139,40 @@ with the `hotwords` query parameter.
 
 `--cpu_threads` sets CTranslate2's thread count for the ASR model, where nearly
 all the compute goes. CTranslate2's own default is **4 threads regardless of
-machine size**, which leaves a large box mostly idle.
+machine size**, which leaves a larger host idle.
 
-Measured here on 16 cores, 30 s of audio at beam 5:
+Measured on an 8-physical-core / 16-thread host, 30 s of audio at beam 5:
 
-| `cpu_threads` | | realtime factor |
+| `cpu_threads` | realtime | |
 |---|---|---|
-| 4 | CTranslate2's default | 2.39× |
-| 8 | half the budget — **this default** | 3.34× |
-| 16 | all cores | 1.08× |
+| 4 | 2.40× | CTranslate2's default |
+| 6 | 2.93× | |
+| 8 | **3.38×** | = physical cores, **this default** |
+| 9 | 1.86× | one thread more, 45% slower |
+| 12 | 1.63× | |
+| 16 | 1.08× | all logical threads |
 
-Using every core was 2.2× *slower* than using four — but that is a property of
-the measuring host, not of CTranslate2. The same box scales like this on pure
-Python busy-loops, with no ASR involved:
+The cliff sits exactly at the physical core count. The 9th thread lands on an SMT
+sibling and shares one core's execution units, and because a GEMM thread team is
+barrier-synchronised, that single contended pair holds up every other thread.
+This is the usual rule for dense linear algebra: **threads = physical cores, not
+logical**. It is not a CTranslate2 quirk, and it is not disk — the model is
+resident in RAM and the audio is page-cached after the warm-up pass.
 
-| processes | throughput vs 1 | parallel efficiency |
-|---|---|---|
-| 4 | 3.94× | 99% |
-| 8 | 6.53× | 82% |
-| 16 | 8.16× | 51% |
+So the default is half the CPU budget (`sched_getaffinity` ∩ cgroup quota), which
+is the physical core count whenever SMT is on. It stays correct even when a
+hypervisor hides the topology, as it did on the host above: `lscpu` there claimed
+"Thread(s) per core: 1" and `thread_siblings_list` reported no siblings, so
+topology detection would have returned 16 and picked the worst setting on the
+chart. That is why this is a flag rather than an auto-detect.
 
-It advertises 16 vCPUs and delivers about 8 cores of real throughput, so 16
-threads are 2× oversubscribed and thrash. CTranslate2 was tracking the hardware
-faithfully.
-
-So the default is half the CPU budget — `sched_getaffinity` intersected with the
-cgroup quota, the same measurement the VAD uses. It beat CTranslate2's default of
-4 on every configuration measured, and it degrades gracefully on oversubscribed
-hosts, which is what containers usually land on.
-
-**On dedicated hardware the full core count may well be faster.** Nothing here
-shows a ceiling intrinsic to CTranslate2 — only this host's. Measure before
-trusting either default:
+**If your host has SMT disabled, pass the real core count** — halving it would
+idle half the machine. Either way the curve is steep on both sides, so measure:
 
 ```bash
-python bench/bench_backends.py your-audio.opus --backends ct2-cpu --limit 3
-# then repeat with CT2_THREADS varied, or time requests against
-# `python serve.py --cpu_threads N` at 4, 8, and your core count
+for n in 4 8 12 16; do python serve.py --cpu_threads $n & sleep 30; \
+  time curl -sX POST --data-binary @sample.opus \
+       localhost:8000/transcribe > /dev/null; kill %1; done
 ```
 
 `/health` reports the resolved value.

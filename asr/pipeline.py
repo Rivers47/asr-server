@@ -459,13 +459,18 @@ class Inference:
         self.vad_injected = False
         self.vad_manager = None
         self.vad_threads = max(0, args.vad_threads or 0)  # 0 = derive from the CPU budget
-        # CTranslate2's own default is 4 threads regardless of machine size, which
-        # leaves a large host idle. Half the budget is the default here instead:
-        # it beat 4 threads on every machine measured, and it degrades gracefully
-        # on hosts that advertise more vCPUs than they can actually deliver --
-        # where asking for every core collapses throughput rather than raising it.
-        # Dedicated hardware may well prefer the full count; see README, and
-        # benchmark --cpu_threads on the host that matters.
+        # Threads should match PHYSICAL cores, the standard rule for dense linear
+        # algebra. Measured on an 8-core/16-thread host, 30 s of audio at beam 5:
+        #   4 -> 2.40x   6 -> 2.93x   8 -> 3.38x   9 -> 1.86x   16 -> 1.08x
+        # The cliff sits exactly at the physical core count: the 9th thread lands
+        # on an SMT sibling, and because the GEMM thread team is barrier-synced,
+        # one contended pair slows every other thread with it.
+        #
+        # Halving the logical count is a proxy for that, correct whenever SMT is
+        # on -- including when a hypervisor hides the topology, as it does above,
+        # where thread_siblings_list reports no siblings at all. That is why this
+        # is a flag and not an auto-detect: on a host with SMT disabled, pass the
+        # real core count instead.
         self.cpu_threads = max(0, args.cpu_threads or 0) or max(1, available_cpus() // 2)
         self.vad_force_cpu = bool(args.vad_force_cpu)
         self.device = (args.device or "auto").strip().lower()
