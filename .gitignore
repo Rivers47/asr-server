@@ -1,0 +1,9 @@
+# Model weights: ~3 GB, fetched with fetch_models.py rather than committed.
+models/
+
+__pycache__/
+*.py[cod]
+.venv/
+.mypy_cache/
+.ruff_cache/
+*.log

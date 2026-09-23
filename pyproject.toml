@@ -1,0 +1,47 @@
+[project]
+name = "asmr-asr-server"
+version = "1.0.0"
+description = "HTTP transcription server: an ASMR-tuned VAD driving faster-whisper"
+requires-python = ">=3.10"
+
+# Deliberately short. faster-whisper pulls ctranslate2, tokenizers, huggingface-hub
+# and av; onnxruntime runs the VAD graph; pyjson5 exists only so the config file
+# can keep its comments. transformers and librosa are NOT needed -- see README.
+dependencies = [
+    "faster-whisper>=1.0.0",
+    "ctranslate2>=4.7.1",      # 4.7.1+ for the pruned-vocab ja models
+    "onnxruntime>=1.17,<1.24", # 1.23.2 is the last with cp310 wheels
+    "numpy>=2.0",
+    "pyjson5>=1.6.0",
+]
+
+[project.optional-dependencies]
+dev = ["ruff", "mypy"]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+ignore = [
+    "E501",   # line length is the formatter's job
+    "E402",   # conditional imports
+    "SIM108", # ternaries are not always clearer
+    "B028",   # explicit stacklevel not needed here
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["asr"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.10"
+warn_unused_ignores = true
+allow_untyped_defs = true
+ignore_missing_imports = true

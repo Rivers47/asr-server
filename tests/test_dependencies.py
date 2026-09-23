@@ -1,0 +1,77 @@
+"""
+Guards the trimmed dependency set.
+
+This package exists to run the pipeline without transformers (69 MB) or librosa
+(347 MB, via numba/llvmlite/scipy/scikit-learn). Both were removable because
+faster-whisper already ships an equivalent log-mel extractor and because every
+caller decodes at 16 kHz, so nothing ever resamples. These tests fail if either
+creeps back in.
+"""
+
+import ast
+import re
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+SOURCES = sorted((ROOT / "asr").glob("*.py")) + [ROOT / "serve.py", ROOT / "fetch_models.py"]
+BANNED = {"transformers", "librosa", "torch", "torchaudio", "scipy", "sklearn", "soundfile", "numba"}
+
+
+def imported_modules(path: Path) -> set[str]:
+    """Every top-level module name imported anywhere in a file, lazy imports included."""
+    names = set()
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.Import):
+            names.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            names.add(node.module.split(".")[0])
+    return names
+
+
+class DependencyHygieneTest(unittest.TestCase):
+    def test_no_heavy_imports_anywhere(self):
+        for path in SOURCES:
+            with self.subTest(file=path.name):
+                offenders = imported_modules(path) & BANNED
+                self.assertEqual(offenders, set(), f"{path.name} imports {offenders}")
+
+    def test_pyproject_declares_only_the_short_list(self):
+        text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        block = text.split("dependencies = [", 1)[1].split("]", 1)[0]
+        declared = {re.split(r"[><=~!\[]", line.strip().strip('",'))[0] for line in block.splitlines() if '"' in line}
+        self.assertEqual(declared, {"faster-whisper", "ctranslate2", "onnxruntime", "numpy", "pyjson5"})
+
+    def test_vad_uses_the_faster_whisper_extractor(self):
+        source = (ROOT / "asr" / "vad_manager.py").read_text(encoding="utf-8")
+        self.assertIn("from faster_whisper.feature_extractor import FeatureExtractor", source)
+        # The parameters must stay the ones the ONNX graph was exported against.
+        for parameter in ("feature_size=80", "sampling_rate=16000", "hop_length=160", "chunk_length=30", "n_fft=400"):
+            self.assertIn(parameter, source)
+
+    def test_resampling_is_a_hard_error_not_a_silent_fallback(self):
+        source = (ROOT / "asr" / "vad_manager.py").read_text(encoding="utf-8")
+        self.assertIn('raise ValueError(f"expected {self.sample_rate} Hz audio', source)
+
+
+class ParserCoverageTest(unittest.TestCase):
+    def test_parser_defines_every_attribute_the_pipeline_reads(self):
+        """Derived from the source, so a new args.* in pipeline.py fails here first."""
+        import sys
+
+        sys.path.insert(0, str(ROOT))
+        import json
+        import types
+
+        sys.modules.setdefault("pyjson5", types.SimpleNamespace(decode_io=json.load))
+        from asr.server import resolve_args
+
+        source = (ROOT / "asr" / "pipeline.py").read_text(encoding="utf-8")
+        needed = set(re.findall(r"\bargs\.([a-z_]+)", source))
+        args = resolve_args([])
+        missing = {name for name in needed if not hasattr(args, name)}
+        self.assertEqual(missing, set(), f"parser is missing {missing}")
+
+
+if __name__ == "__main__":
+    unittest.main()
