@@ -6,6 +6,7 @@ single ONNX session shared by both VAD passes rather than one per call.
 import json
 import os
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -20,7 +21,11 @@ from asr.vad_manager import VadConfig, available_cpus  # noqa: E402
 
 class AvailableCpusTest(unittest.TestCase):
     def setUp(self):
-        self.root = Path(self.enterContext(__import__("tempfile").TemporaryDirectory()))
+        # addCleanup rather than enterContext: the latter is Python 3.11+, and
+        # pyproject declares requires-python = ">=3.10".
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        self.root = Path(scratch.name)
         self.host = len(os.sched_getaffinity(0))
 
     def test_no_cgroup_files_falls_back_to_affinity(self):
