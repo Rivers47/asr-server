@@ -110,6 +110,40 @@ transcripts.
 
 The image runs as uid 10001 and binds `0.0.0.0` inside the container — publish
 the port only where you want it reachable, since there is no authentication.
+
+### Rootless podman and the models bind mount
+
+A bind mount keeps the **host** directory's ownership; the image's uid 10001 does
+not apply to it. Serving is unaffected, because the models only need to be read
+and a normal 755/644 directory is world-readable through any uid mapping.
+
+Writing is the case that bites: `fetch_models.py` has to create 3 GB inside a
+directory the host user owns, and uid 10001 is not that user under either
+mapping.
+
+| | host uid inside the container |
+|---|---|
+| rootless default | maps to 0 |
+| `--userns=keep-id` | maps to itself |
+
+Neither is 10001, so run the fetch step as the user that owns the directory:
+
+```bash
+# container-root maps to your host user under the default rootless mapping
+podman run --rm --user 0 -v ./models:/srv/models:Z asmr-asr python fetch_models.py
+
+# or let podman chown the source to match the image user
+podman run --rm -v ./models:/srv/models:U,Z asmr-asr python fetch_models.py
+
+# or just run it on the host -- it only needs Python and the stdlib
+python fetch_models.py
+```
+
+Serving then needs no special handling:
+
+```bash
+podman run --rm -v ./models:/srv/models:ro,Z -p 127.0.0.1:8000:8000 asmr-asr
+```
 `--vad_threads` is left at its default on purpose: it reads the cgroup quota, so
 `--cpus 2` gives the VAD one thread without being told.
 

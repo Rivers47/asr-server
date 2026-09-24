@@ -47,11 +47,17 @@ RUN uv sync --frozen --no-dev
 COPY asr/ asr/
 COPY serve.py fetch_models.py generation_config.json5 ./
 
-# Mount point for the weights. Created up front so a read-only bind mount lands
-# on an existing directory owned by the runtime user.
+# Mount point for the weights. Only this path is chowned: nothing else under
+# /srv is written at runtime -- uploads and rendered subtitles go to /tmp via
+# mkstemp, and the venv only needs read+execute, which its 755 already gives.
+# `chown -R /srv` would rewrite every file in the ~400 MB venv into a new layer.
+#
+# This ownership only applies to an anonymous volume. A bind mount keeps the
+# host directory's ownership, which is what rootless podman users get -- see the
+# README for the uid mapping that implies.
 RUN useradd --create-home --uid 10001 asr \
  && mkdir -p /srv/models \
- && chown -R asr:asr /srv
+ && chown asr:asr /srv/models
 
 # Declared after the chown, so an anonymous volume inherits uid 10001 rather
 # than root. Without this, `fetch_models.py` run without -v writes 3 GB into the
