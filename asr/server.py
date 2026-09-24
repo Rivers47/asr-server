@@ -213,6 +213,32 @@ class TranscriptionError(Exception):
     """Raised when a single request fails; reported to the client as a 500."""
 
 
+class MissingModelError(RuntimeError):
+    """Raised at startup when a required model file is absent."""
+
+
+def _require_models(inference) -> None:
+    """Refuse to start without the models, rather than degrading silently.
+
+    A missing VAD is the dangerous one: ``Inference`` only logs a warning, the
+    server comes up, ``/health`` reports ok -- and then every request returns an
+    empty transcript, because with no speech spans the chunk planner reports
+    zero speech and the decoder is never reached. A server answering 200 with
+    "" is worse than one that does not come up.
+    """
+    if not inference.vad_manager or inference.vad_manager.get_device() == "Not initialized":
+        raise MissingModelError(
+            f"VAD model not loaded. Expected models/whisper_vad.onnx relative to {os.getcwd()}.\n"
+            "Run: python fetch_models.py --only vad"
+        )
+
+    # model_name_or_path may be a HuggingFace repo id, which faster-whisper
+    # downloads itself -- only check it when it names a local directory.
+    asr_path = inference.model_name_or_path
+    if os.path.isdir(asr_path) and not os.path.exists(os.path.join(asr_path, "model.bin")):
+        raise MissingModelError(f"No model.bin in {os.path.abspath(asr_path)}.\nRun: python fetch_models.py --only asr")
+
+
 class TranscriptionService:
     """Owns the loaded models and runs one transcription at a time.
 
@@ -224,6 +250,7 @@ class TranscriptionService:
 
     def __init__(self, args: argparse.Namespace, max_queue: int = 8):
         self.inference = Inference(args)
+        _require_models(self.inference)
         self.max_queue = max_queue
         self._lock = threading.Lock()
         self._waiting = 0

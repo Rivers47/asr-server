@@ -97,6 +97,12 @@ Weights are a bind mount rather than image content: 3 GB that versions
 independently of the code. The dependency layer is separate from the source
 layer, so editing `asr/` rebuilds in seconds.
 
+**Nothing downloads the models for you.** `fetch_models.py` has to be run once
+against the volume — the first command above — and the image has no network
+fallback at runtime. If the volume is empty or half-populated the server refuses
+to start and names the missing file, rather than coming up and returning empty
+transcripts.
+
 The image runs as uid 10001 and binds `0.0.0.0` inside the container — publish
 the port only where you want it reachable, since there is no authentication.
 `--vad_threads` is left at its default on purpose: it reads the cgroup quota, so
@@ -225,6 +231,9 @@ silent reinterpretation.
 `tests/test_dependencies.py` fails if either returns.
 
 ## Models
+
+Fetched once, explicitly. There is no lazy download at first request, and no
+fallback if the directory is missing.
 
 | | source | size |
 |---|---|---|

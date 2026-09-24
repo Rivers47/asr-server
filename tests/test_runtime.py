@@ -21,8 +21,8 @@ from asr.vad_manager import VadConfig, available_cpus  # noqa: E402
 
 class AvailableCpusTest(unittest.TestCase):
     def setUp(self):
-        # addCleanup rather than enterContext: the latter is Python 3.11+, and
-        # pyproject declares requires-python = ">=3.10".
+        # addCleanup rather than enterContext: equivalent, and not gated on a
+        # minimum Python version if the floor is ever lowered again.
         scratch = tempfile.TemporaryDirectory()
         self.addCleanup(scratch.cleanup)
         self.root = Path(scratch.name)
@@ -114,6 +114,58 @@ class ThreadBudgetTest(unittest.TestCase):
         from asr import server
 
         self.assertIn('"cpu_threads"', inspect.getsource(server.TranscriptionService.describe))
+
+
+class PreflightTest(unittest.TestCase):
+    """Missing models must stop startup, not degrade into empty transcripts."""
+
+    def setUp(self):
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        self.root = Path(scratch.name)
+
+    @staticmethod
+    def _inference(vad_device, model_path):
+        return types.SimpleNamespace(
+            vad_manager=types.SimpleNamespace(get_device=lambda: vad_device),
+            model_name_or_path=str(model_path),
+        )
+
+    def test_uninitialised_vad_refuses_to_start(self):
+        from asr.server import MissingModelError, _require_models
+
+        (self.root / "model.bin").write_bytes(b"x")
+        with self.assertRaises(MissingModelError) as caught:
+            _require_models(self._inference("Not initialized", self.root))
+        self.assertIn("whisper_vad.onnx", str(caught.exception))
+        self.assertIn("fetch_models.py", str(caught.exception))
+
+    def test_absent_vad_manager_refuses_to_start(self):
+        from asr.server import MissingModelError, _require_models
+
+        (self.root / "model.bin").write_bytes(b"x")
+        inference = types.SimpleNamespace(vad_manager=None, model_name_or_path=str(self.root))
+        with self.assertRaises(MissingModelError):
+            _require_models(inference)
+
+    def test_missing_model_bin_refuses_to_start(self):
+        from asr.server import MissingModelError, _require_models
+
+        with self.assertRaises(MissingModelError) as caught:
+            _require_models(self._inference("CPU", self.root))
+        self.assertIn("model.bin", str(caught.exception))
+
+    def test_both_present_passes(self):
+        from asr.server import _require_models
+
+        (self.root / "model.bin").write_bytes(b"x")
+        _require_models(self._inference("CPU", self.root))  # must not raise
+
+    def test_non_directory_path_is_left_to_faster_whisper(self):
+        """A HuggingFace repo id is not a local path and must not be rejected."""
+        from asr.server import _require_models
+
+        _require_models(self._inference("CPU", "TransWithAI/whisper-ja-1.5B-ct2"))
 
 
 class ManagerCacheTest(unittest.TestCase):
