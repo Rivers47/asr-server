@@ -95,6 +95,95 @@ internet. Behind a proxy or an air-gapped network the build fails on the first
 `FROM`; mirror both into your own registry and rewrite the two `FROM`/`COPY
 --from` lines in `containerfile`.
 
+## `SSL certificate problem: unable to get local issuer certificate`
+
+The clone fails in the job, not on your machine — CI clones over HTTP(S) using
+`CI_REPOSITORY_URL`, even when your own remote is `git@`. It means the job
+container does not trust whatever CA signed your GitLab certificate.
+
+Check what is actually being served:
+
+```bash
+curl -sSv https://gitlab.example.com/ -o /dev/null 2>&1 | grep -E "issuer|verify"
+```
+
+An issuer like `CN=Caddy Local Authority` means Caddy's internal CA
+(`tls internal`), which is self-signed by design. Same story for a bare
+self-signed cert or a private company CA.
+
+### Best fix: issue a publicly trusted certificate
+
+If you own the domain, give Caddy an ACME issuer instead of the internal one.
+For a host with no public A record, use DNS-01 with the plugin for your provider:
+
+```caddyfile
+gitlab.example.com {
+    tls {
+        dns cloudflare {env.CF_API_TOKEN}
+    }
+    reverse_proxy localhost:8080
+}
+```
+
+Everything downstream — runners, `docker login`, `git clone`, your laptop — then
+works with no configuration at all. Worth the twenty minutes; the alternative is
+distributing a CA to every client forever.
+
+### Otherwise: give the runner the CA
+
+Find Caddy's root (paths vary by install):
+
+```bash
+sudo find / -name root.crt -path "*caddy*" 2>/dev/null
+# usually /var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt
+# Docker installs: /data/caddy/pki/authorities/local/root.crt
+```
+
+Copy it onto the **runner** host, named for the GitLab hostname:
+
+```bash
+sudo mkdir -p /etc/gitlab-runner/certs
+sudo cp root.crt /etc/gitlab-runner/certs/gitlab.example.com.crt
+sudo gitlab-runner restart
+```
+
+GitLab Runner looks for `/etc/gitlab-runner/certs/<hostname>.crt` specifically,
+mounts it into job containers, and points `CI_SERVER_TLS_CA_FILE` at it — which
+is what the clone step reads. The filename must match the hostname in the URL.
+
+If the runner itself is containerised, that directory has to be a volume:
+
+```bash
+docker run -d --name gitlab-runner --restart always \
+  -v /srv/gitlab-runner/config:/etc/gitlab-runner \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  gitlab/gitlab-runner:latest
+# then place the .crt in /srv/gitlab-runner/config/certs/
+```
+
+### Escape hatch
+
+```yaml
+variables:
+  GIT_SSL_NO_VERIFY: "true"
+```
+
+Unblocks the clone immediately and disables certificate verification for it.
+Acceptable while you sort the CA out on a private network; not a resting place.
+
+### This will come back with the registry
+
+If you enable the Container Registry behind the same Caddy, `docker login` and
+`docker pull` need the CA too — in a different location, per registry host:
+
+```bash
+sudo mkdir -p /etc/docker/certs.d/gitlab.example.com:5050
+sudo cp root.crt /etc/docker/certs.d/gitlab.example.com:5050/ca.crt
+```
+
+Podman reads `/etc/containers/certs.d/` with the same layout. This is the main
+argument for fixing it at the certificate rather than distributing the CA.
+
 ## What the smoke test does and does not prove
 
 The image ships no weights — they are a 3 GB bind mount — so CI cannot transcribe
