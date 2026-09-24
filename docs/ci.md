@@ -253,8 +253,30 @@ sudo mkdir -p /etc/docker/certs.d/gitlab.example.com:5050
 sudo cp root.crt /etc/docker/certs.d/gitlab.example.com:5050/ca.crt
 ```
 
-Podman reads `/etc/containers/certs.d/` with the same layout. This is the main
-argument for fixing it at the certificate rather than distributing the CA.
+Podman and buildah read `/etc/containers/certs.d/` with the same layout.
+
+**In CI the job container is ephemeral**, so there is nothing to copy into — the
+`buildah push` step needs the CA mounted at that path from the runner config,
+which is a *second* mount alongside the one the clone uses:
+
+```toml
+[runners.docker]
+  volumes = [
+    "/cache",
+    # git clone
+    "/etc/gitlab-runner/certs/ca.crt:/etc/gitlab-runner/certs/ca.crt:ro",
+    # buildah push -- note the registry port is part of the directory name
+    "/etc/gitlab-runner/certs/ca.crt:/etc/containers/certs.d/gitlab.example.com:5050/ca.crt:ro",
+  ]
+```
+
+The port belongs in the directory name, and must match the registry host exactly
+as it appears in `$CI_REGISTRY`. A mismatch fails as an untrusted certificate,
+not as a missing file.
+
+That is the same root certificate reaching its fourth location — runner process,
+job container, host docker/podman, CI job container — which is the argument for
+fixing this at the certificate rather than distributing the CA.
 
 ## What the smoke test does and does not prove
 
