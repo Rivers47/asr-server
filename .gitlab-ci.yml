@@ -38,12 +38,8 @@ test:
 # build -- image build, and a push only if this GitLab has its registry enabled
 # ---------------------------------------------------------------------------
 
-# Built with buildah rather than docker:dind, because dind needs a privileged
-# runner and rootless podman cannot provide one. buildah builds unprivileged,
-# and produces OCI images, which is what containerfile targets anyway.
-#
-# On a privileged docker-executor runner, the dind variant in docs/ci.md is
-# faster (overlay storage instead of vfs).
+# buildah builds unprivileged, which a rootless podman runner requires.
+# docs/ci.md has a dind variant for privileged docker runners.
 container:
   stage: build
   image: quay.io/buildah/stable

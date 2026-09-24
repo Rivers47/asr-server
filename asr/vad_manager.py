@@ -140,13 +140,9 @@ class WhisperVADOnnxWrapper:
                 "total_duration_ms": 30000,
             }
 
-        # Log-mel front end for the VAD graph. faster-whisper ships a pure-numpy
-        # extractor whose defaults are exactly what this model was exported against
-        # (80 mel, 400-point FFT, 160-sample hop, 30 s window -> 80 x 3000), so it
-        # replaces transformers' WhisperFeatureExtractor here: verified identical to
-        # 4.2e-07 max abs difference on every frame but the last of each chunk.
-        # Nothing else in this package needs transformers, and no whisper-base
-        # config files have to ship.
+        # Log-mel front end for the VAD graph. These parameters are what the ONNX
+        # model was exported against: 80 mel, 400-point FFT, 160-sample hop over a
+        # 30 s window, giving 80 x 3000.
         self.feature_extractor = FeatureExtractor(
             feature_size=80,
             sampling_rate=16000,
@@ -226,10 +222,7 @@ class WhisperVADOnnxWrapper:
             # Convert to mono if multi-channel
             audio = audio.mean(axis=0 if audio.shape[0] > audio.shape[1] else 1)
 
-        # Every caller decodes through faster-whisper's decode_audio at 16 kHz, so
-        # this is a guard rather than a resampling path -- keeping it a hard error
-        # means librosa (and its numba/llvmlite/scipy/sklearn chain) stays out of
-        # the dependency set.
+        # Callers decode at 16 kHz; this only guards against a caller that did not.
         if sr != self.sample_rate:
             raise ValueError(f"expected {self.sample_rate} Hz audio, got {sr} Hz; resample before calling the VAD")
 

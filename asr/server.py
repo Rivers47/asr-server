@@ -4,16 +4,12 @@ HTTP transcription server.
 Loads the VAD and Whisper models once at startup and serves them over HTTP, so
 callers pay the multi-second model load only on boot instead of on every file.
 
-Stdlib only -- no web framework. That keeps the PyInstaller bundle unchanged and
-the dependency list identical to the CLI.
-
 Endpoints:
     GET  /health              -- liveness plus the loaded model configuration
     POST /transcribe          -- audio in, transcript out
 
-The pipeline itself is not reimplemented here: this module drives the same
-``Inference`` object the CLI uses, so VAD injection, smart chunking and segment
-merging behave exactly as they do for ``infer.py``.
+Drives the same ``Inference`` object the CLI uses, so VAD injection, smart
+chunking and segment merging behave identically.
 """
 
 import argparse
@@ -400,10 +396,8 @@ class TranscribeHandler(BaseHTTPRequestHandler):
         self._send(status, body, "application/json; charset=utf-8", close=close)
 
     def _send_error(self, status: HTTPStatus, message: str) -> None:
-        # Errors can fire before the request body has been read -- rejecting an
-        # oversized upload must not mean reading it first. Any unread bytes would
-        # be parsed as the next request on a keep-alive connection, so every
-        # error response closes the connection instead of draining.
+        # Errors can fire before the body has been read, and unread bytes would be
+        # parsed as the next request on a keep-alive connection.
         logger.warning("%s: %s", status.phrase, message)
         self._send_json(status, {"error": message, "status": int(status)}, close=True)
 
