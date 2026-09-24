@@ -185,6 +185,20 @@ not negotiable: it must be `ca.crt` at that path.
 Lookup locations differ by how the runner runs: `/etc/gitlab-runner/certs/` as
 root, `~/.gitlab-runner/certs/` as a normal user, `./certs/` elsewhere.
 
+**Use the root, not the intermediate.** Caddy's PKI directory holds both
+`root.crt` and `intermediate.crt`, and Caddy serves leaf + intermediate in the
+handshake — so the client needs only the root as its trust anchor. Trusting the
+intermediate instead fails with the same "unable to get local issuer" message,
+which makes it an easy hour to lose.
+
+Confirm the file works before restarting anything. If `curl` accepts it, so will
+the runner:
+
+```bash
+curl --cacert /etc/gitlab-runner/certs/ca.crt https://gitlab.example.com/ -o /dev/null -sS \
+  && echo "CA is correct"
+```
+
 If the runner is itself containerised, the host directory must be part of its
 config volume or the file disappears on restart:
 
