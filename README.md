@@ -97,6 +97,11 @@ Weights are a bind mount rather than image content: 3 GB that versions
 independently of the code. The dependency layer is separate from the source
 layer, so editing `asr/` rebuilds in seconds.
 
+`/srv/models` is declared as a `VOLUME`, so a `fetch_models.py` run that forgets
+`-v` lands in a volume instead of writing 3 GB into the container's writable
+layer. It is declared after the `chown`, so an anonymous volume inherits uid
+10001 rather than root.
+
 **Nothing downloads the models for you.** `fetch_models.py` has to be run once
 against the volume — the first command above — and the image has no network
 fallback at runtime. If the volume is empty or half-populated the server refuses

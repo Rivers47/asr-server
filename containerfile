@@ -53,6 +53,13 @@ RUN useradd --create-home --uid 10001 asr \
  && mkdir -p /srv/models \
  && chown -R asr:asr /srv
 
+# Declared after the chown, so an anonymous volume inherits uid 10001 rather
+# than root. Without this, `fetch_models.py` run without -v writes 3 GB into the
+# container's writable layer; with it, that lands in a volume instead. Forgetting
+# -v still gets you an empty models directory, but the server refuses to start
+# and says which file is missing rather than serving empty transcripts.
+VOLUME /srv/models
+
 USER 10001
 EXPOSE 8000
 
