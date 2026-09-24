@@ -317,7 +317,7 @@ def probe(module: str) -> bool:
 
     try:
         return importlib.util.find_spec(module) is not None
-    except (ImportError, ValueError):
+    except ImportError, ValueError:
         return False
 
 

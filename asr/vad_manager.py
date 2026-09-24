@@ -29,7 +29,7 @@ def available_cpus(cgroup_root: str | pathlib.Path = "/sys/fs/cgroup") -> int:
     """
     try:
         budget = len(os.sched_getaffinity(0))  # respects cpuset, Linux only
-    except (AttributeError, OSError):
+    except AttributeError, OSError:
         budget = os.cpu_count() or 1
 
     root = pathlib.Path(cgroup_root)
@@ -40,7 +40,7 @@ def available_cpus(cgroup_root: str | pathlib.Path = "/sys/fs/cgroup") -> int:
         if quota_us != "max":
             return max(1, min(budget, int(int(quota_us) / int(period_us))))
         return max(1, budget)
-    except (OSError, ValueError):
+    except OSError, ValueError:
         pass
 
     # cgroup v1: quota and period in separate files, -1 when unlimited.
@@ -49,7 +49,7 @@ def available_cpus(cgroup_root: str | pathlib.Path = "/sys/fs/cgroup") -> int:
         period = int(root.joinpath("cpu/cpu.cfs_period_us").read_text())
         if quota > 0 and period > 0:
             return max(1, min(budget, int(quota / period)))
-    except (OSError, ValueError):
+    except OSError, ValueError:
         pass
 
     return max(1, budget)
@@ -166,8 +166,9 @@ class WhisperVADOnnxWrapper:
             threads = num_threads
             source = "configured"
         else:
-            # Half the budget by default: the ASR model is running on the other
-            # half, and the two alternate rather than overlap.
+            # Half the logical count, which is the physical core count under SMT.
+            # Thread teams doing dense linear algebra collapse past that: see the
+            # measurements in README, where one thread too many cost 45%.
             budget = available_cpus()
             threads = max(1, budget // 2)
             source = f"auto, half of {budget} available"

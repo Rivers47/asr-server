@@ -22,12 +22,11 @@ dev = ["ruff", "mypy"]
 package = false
 
 [tool.ruff]
-# Deliberately one behind requires-python. At py314 the formatter rewrites
-# `except (OSError, ValueError):` as `except OSError, ValueError:` (PEP 758),
-# which is valid 3.14 but reads exactly like Python 2's `except E, name:` --
-# where the second element was the bound variable, not a second exception type.
-# Nothing is gained by adopting it, and a misreading is a silent behaviour bug.
-target-version = "py313"
+# Matches requires-python. Note this makes the formatter adopt PEP 758
+# unparenthesised except clauses -- `except OSError, ValueError:` lists two
+# exception types, it does not bind one to a name the way Python 2's
+# `except E, name:` did.
+target-version = "py314"
 line-length = 120
 
 [tool.ruff.lint]

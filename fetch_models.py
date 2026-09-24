@@ -33,7 +33,7 @@ def remote_size(url: str) -> int | None:
         with urllib.request.urlopen(request, timeout=30) as response:
             length = response.headers.get("Content-Length")
             return int(length) if length else None
-    except (urllib.error.URLError, ValueError):
+    except urllib.error.URLError, ValueError:
         return None
 
 
