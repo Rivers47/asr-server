@@ -241,16 +241,48 @@ curl --cacert /etc/gitlab-runner/certs/ca.crt https://gitlab.example.com/ -o /de
   && echo "CA is correct"
 ```
 
-If the runner is itself containerised, the host directory must be part of its
-config volume or the file disappears on restart:
+#### If the runner is itself containerised
+
+Then the two settings are resolved by two different processes against two
+different filesystems, and a path that looks right can be wrong:
+
+| setting | resolved by | against |
+|---|---|---|
+| `tls-ca-file` | the runner process | the **runner container's** filesystem |
+| `runners.docker.volumes` host side | the container runtime | the **host's** filesystem |
+
+So `tls-ca-file = "/etc/gitlab-runner/certs/ca.crt"` can work perfectly — the
+runner authenticates and picks up jobs — while the identical string as a mount
+source refers to a path that does not exist on the host. The runtime then tries
+to create it and fails.
+
+It is one file with two names. Find the mapping:
 
 ```bash
-docker run -d --name gitlab-runner --restart always \
-  -v /srv/gitlab-runner/config:/etc/gitlab-runner \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  gitlab/gitlab-runner:latest
-# place the .crt in /srv/gitlab-runner/config/certs/
+podman inspect gitlab-runner \
+  --format '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{"\n"}}{{end}}'
 ```
+
+With the usual layout — host `/srv/gitlab-runner/config` mounted at container
+`/etc/gitlab-runner` — a certificate placed at
+`/srv/gitlab-runner/config/certs/ca.crt` on the host appears to the runner as
+`/etc/gitlab-runner/certs/ca.crt`, and the config uses **both** spellings:
+
+```toml
+  # container view: the runner process reads this
+  tls-ca-file = "/etc/gitlab-runner/certs/ca.crt"
+
+  [runners.docker]
+    volumes = [
+      "/cache",
+      # host view on the left, job-container view on the right
+      "/srv/gitlab-runner/config/certs/ca.crt:/etc/gitlab-runner/certs/ca.crt:ro",
+    ]
+```
+
+Putting it inside the config volume also means it survives a runner restart.
+The host-side file still has to be readable by the uid owning the container
+runtime socket, which is a separate condition from existing in the right place.
 
 Your own `script:` steps do not inherit the trust store either — the helper
 image installs `ca.crt` for git and artifacts, not for arbitrary commands. If a
