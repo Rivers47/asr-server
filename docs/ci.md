@@ -171,28 +171,52 @@ sudo cp root.crt /etc/gitlab-runner/certs/gitlab.example.com.crt
   tls-ca-file = "/etc/gitlab-runner/certs/gitlab.example.com.crt"
 
   [runners.docker]
-    # 2. the job container -- destination MUST be exactly ca.crt; the helper
-    #    image installs that file into the trust store at start-up
+    # 2. the job container. Entries are "HOST_PATH:CONTAINER_PATH:options".
+    #    The container path must be exactly /etc/gitlab-runner/certs/ca.crt --
+    #    the helper image installs that file into the trust store at start-up.
+    #    The host path can be anywhere the container runtime can read (see below).
     volumes = [
       "/cache",
-      "/etc/gitlab-runner/certs/gitlab.example.com.crt:/etc/gitlab-runner/certs/ca.crt:ro",
+      "/srv/runner-certs/ca.crt:/etc/gitlab-runner/certs/ca.crt:ro",
     ]
 ```
+
+Keep the two sides visibly different. Writing the same path twice works, but
+makes it impossible to tell at a glance which side failed when something breaks.
 
 Then `sudo gitlab-runner restart`.
 
 #### With a rootless podman runner
 
-The source path is opened by the podman user, not by root, so the file has to be
-readable by that uid:
+The **host** side of a mount is opened by the podman user, not by root — and the
+runner process and the podman socket are often different users. A runner running
+as root reads `tls-ca-file` from `/etc/` happily, then hands the same path to a
+rootless podman that cannot see it at all.
 
-```bash
-sudo chmod 644 /etc/gitlab-runner/certs/ca.crt
-sudo -u "#958" cat /etc/gitlab-runner/certs/ca.crt >/dev/null && echo "readable"
+When the source is missing from the runtime's view, podman tries to create it,
+and you get this at `prepare environment`, before any script runs:
+
+```
+make cli opts(): making volume mountpoint for volume /etc/gitlab-runner/certs/ca.crt:
+mkdir /etc/gitlab-runner: permission denied
 ```
 
-A mount whose source the runtime cannot read fails the job with a confusing
-error, or silently produces an empty file.
+`mkdir` on the *source* is the tell. It fails every job in the pipeline, not just
+the one that needed the certificate, because `runners.docker.volumes` applies to
+all of them.
+
+Put the file somewhere the socket's user owns:
+
+```bash
+id -u gitlab-runner                     # whichever uid owns the podman socket
+sudo install -d -o 958 -g 958 /srv/runner-certs
+sudo install -o 958 -g 958 -m 644 /etc/gitlab-runner/certs/ca.crt /srv/runner-certs/ca.crt
+sudo -u "#958" cat /srv/runner-certs/ca.crt >/dev/null && echo readable
+```
+
+and use `/srv/runner-certs/ca.crt` as the host side. On an SELinux-enforcing host
+add `:Z` to the mount as well — otherwise the container starts and then cannot
+read the file, which is a different error one step later.
 
 On naming: the host-side filename only has to match the hostname if you rely on
 the runner's automatic lookup — `<hostname>.crt`, base hostname with **no port**,
