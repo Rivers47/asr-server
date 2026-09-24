@@ -131,6 +131,18 @@ distributing a CA to every client forever.
 
 ### Otherwise: give the runner the CA
 
+Two separate certificates are involved, and fixing only one leaves the clone
+broken:
+
+| who | needs it for | where |
+|---|---|---|
+| the **runner process** | polling GitLab for jobs | `/etc/gitlab-runner/certs/<hostname>.crt`, or any path via `tls-ca-file` |
+| the **job/helper container** | `git clone`, artifacts, cache | a volume mounted at `/etc/gitlab-runner/certs/ca.crt` *inside* the container |
+
+A clone failing with `unable to get local issuer certificate` is the second one.
+Dropping the file on the host alone does not fix it — with the Docker executor,
+host certificates do not reach job containers.
+
 Find Caddy's root (paths vary by install):
 
 ```bash
@@ -139,27 +151,55 @@ sudo find / -name root.crt -path "*caddy*" 2>/dev/null
 # Docker installs: /data/caddy/pki/authorities/local/root.crt
 ```
 
-Copy it onto the **runner** host, named for the GitLab hostname:
+Place it on the runner host and wire up both paths:
 
 ```bash
 sudo mkdir -p /etc/gitlab-runner/certs
 sudo cp root.crt /etc/gitlab-runner/certs/gitlab.example.com.crt
-sudo gitlab-runner restart
 ```
 
-GitLab Runner looks for `/etc/gitlab-runner/certs/<hostname>.crt` specifically,
-mounts it into job containers, and points `CI_SERVER_TLS_CA_FILE` at it — which
-is what the clone step reads. The filename must match the hostname in the URL.
+```toml
+[[runners]]
+  url = "https://gitlab.example.com/"
+  executor = "docker"
+  # 1. the runner process itself
+  tls-ca-file = "/etc/gitlab-runner/certs/gitlab.example.com.crt"
 
-If the runner itself is containerised, that directory has to be a volume:
+  [runners.docker]
+    # 2. the job container -- destination MUST be exactly ca.crt; the helper
+    #    image installs that file into the trust store at start-up
+    volumes = [
+      "/cache",
+      "/etc/gitlab-runner/certs/gitlab.example.com.crt:/etc/gitlab-runner/certs/ca.crt:ro",
+    ]
+```
+
+Then `sudo gitlab-runner restart`.
+
+On naming: the host-side filename only has to match the hostname if you rely on
+the runner's automatic lookup — `<hostname>.crt`, base hostname with **no port**,
+so `gitlab.example.com.crt` even for `https://gitlab.example.com:8443/`. Setting
+`tls-ca-file` explicitly lets you call it anything. The container-side name is
+not negotiable: it must be `ca.crt` at that path.
+
+Lookup locations differ by how the runner runs: `/etc/gitlab-runner/certs/` as
+root, `~/.gitlab-runner/certs/` as a normal user, `./certs/` elsewhere.
+
+If the runner is itself containerised, the host directory must be part of its
+config volume or the file disappears on restart:
 
 ```bash
 docker run -d --name gitlab-runner --restart always \
   -v /srv/gitlab-runner/config:/etc/gitlab-runner \
   -v /var/run/docker.sock:/var/run/docker.sock \
   gitlab/gitlab-runner:latest
-# then place the .crt in /srv/gitlab-runner/config/certs/
+# place the .crt in /srv/gitlab-runner/config/certs/
 ```
+
+Your own `script:` steps do not inherit the trust store either — the helper
+image installs `ca.crt` for git and artifacts, not for arbitrary commands. If a
+job needs to `curl` your GitLab, install it there too, via `pre_build_script` or
+a line in the job.
 
 ### Escape hatch
 
