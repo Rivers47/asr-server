@@ -102,9 +102,10 @@ the port only where you want it reachable, since there is no authentication.
 `--vad_threads` is left at its default on purpose: it reads the cgroup quota, so
 `--cpus 2` gives the VAD one thread without being told.
 
-> Unbuilt — there is no container runtime in the environment this was written
-> in, so `uv sync --frozen` under `package = false` and the `libgomp1` dependency
-> are reasoned, not verified.
+CI builds this image on every push and smoke-tests it (`serve.py --help`,
+`fetch_models.py --help`, `import asr.server`). What CI cannot check is model
+loading or transcription — the image carries no weights — so a change to the
+pipeline still wants one real request against a running container.
 
 ## How it works
 
