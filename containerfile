@@ -47,26 +47,21 @@ RUN uv sync --frozen --no-dev
 COPY asr/ asr/
 COPY serve.py fetch_models.py generation_config.json5 ./
 
-# Mount point for the weights. Only this path is chowned: nothing else under
-# /srv is written at runtime -- uploads and rendered subtitles go to /tmp via
-# mkstemp, and the venv only needs read+execute, which its 755 already gives.
-# `chown -R /srv` would rewrite every file in the ~400 MB venv into a new layer.
+# No USER on purpose. Under rootless podman the container's root is already an
+# unprivileged host user, so a baked-in uid drops no privilege -- it only stops
+# the process matching the owner of a bind-mounted models directory, which is
+# the one thing here that needs write access.
 #
-# This ownership only applies to an anonymous volume. A bind mount keeps the
-# host directory's ownership, which is what rootless podman users get -- see the
-# README for the uid mapping that implies.
-RUN useradd --create-home --uid 10001 asr \
- && mkdir -p /srv/models \
- && chown asr:asr /srv/models
+# Running this under ROOTFUL docker or podman does give the process real root.
+# Pass --user there:  podman run --user 10001:10001 ...
+# Nothing in the image needs to write outside /tmp and the models mount.
 
-# Declared after the chown, so an anonymous volume inherits uid 10001 rather
-# than root. Without this, `fetch_models.py` run without -v writes 3 GB into the
-# container's writable layer; with it, that lands in a volume instead. Forgetting
-# -v still gets you an empty models directory, but the server refuses to start
-# and says which file is missing rather than serving empty transcripts.
+# Without this, `fetch_models.py` run without -v writes 3 GB into the container's
+# writable layer; with it, that lands in a volume instead. Forgetting -v still
+# gets you an empty models directory, but the server refuses to start and names
+# the missing file rather than serving empty transcripts.
 VOLUME /srv/models
 
-USER 10001
 EXPOSE 8000
 
 # 0.0.0.0 because the container's loopback is unreachable from the host. Publish

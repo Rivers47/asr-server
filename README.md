@@ -108,6 +108,31 @@ fallback at runtime. If the volume is empty or half-populated the server refuses
 to start and names the missing file, rather than coming up and returning empty
 transcripts.
 
+The image binds `0.0.0.0` inside the container — publish the port only where you
+want it reachable, since there is no authentication.
+
+It declares no `USER`. Under rootless podman the container's root is already an
+unprivileged host user, so a baked-in uid drops no privilege; it only stops the
+process matching the owner of a bind-mounted models directory, which is the one
+path here that needs write access. With the default rootless mapping, container
+root *is* your host user, so `fetch_models.py` writes to `./models` with no extra
+flags. Under `--userns=keep-id`, add `--user $(id -u)` if a write fails.
+
+Running it under **rootful** docker or podman does give the process real root —
+pass `--user 10001:10001` there. Nothing in the image writes outside `/tmp` and
+the models mount.
+
+`/srv/models` is declared as a `VOLUME`, so a `fetch_models.py` run that forgets
+`-v` lands in a volume instead of writing 3 GB into the container's writable
+layer. It is declared after the `chown`, so an anonymous volume inherits uid
+10001 rather than root.
+
+**Nothing downloads the models for you.** `fetch_models.py` has to be run once
+against the volume — the first command above — and the image has no network
+fallback at runtime. If the volume is empty or half-populated the server refuses
+to start and names the missing file, rather than coming up and returning empty
+transcripts.
+
 The image runs as uid 10001 and binds `0.0.0.0` inside the container — publish
 the port only where you want it reachable, since there is no authentication.
 
