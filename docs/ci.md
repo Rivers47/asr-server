@@ -46,47 +46,52 @@ sudo cat /etc/gitlab-runner/config.toml
 **`check` needs only** `executor = "docker"` (any image) or a `shell` executor
 with Python 3.10+.
 
-**`build` as written needs docker-in-docker**, which needs a privileged runner:
+**`build` as written uses buildah**, which builds unprivileged — so it works on a
+rootless podman runner, where docker-in-docker cannot. A rootless runner looks
+like this:
 
 ```toml
-[[runners]]
-  executor = "docker"
-  [runners.docker]
-    privileged = true          # required for docker:dind
-    volumes = ["/certs/client", "/cache"]
+[runners.docker]
+  host = "unix:///run/user/1000/podman/podman.sock"
+  privileged = false
 ```
 
-`gitlab-runner register` does **not** set `privileged` by default, so if you
-accepted the defaults this is the line to add. Then
-`sudo gitlab-runner restart`.
+`privileged = false` plus a rootless socket means `docker:dind` will fail with
+`Cannot connect to the Docker daemon` no matter how the service is configured.
+That is not a misconfiguration to fix; it is the point of running rootless.
 
-### If you do not want a privileged runner
+### If you do have a privileged docker runner
 
-Privileged dind gives the job effective root on the host. On a personal server
-that may be fine; if not, swap the `container` job for buildah, which builds
-rootless and suits `containerfile` better anyway:
+dind is faster (overlay storage rather than buildah's `vfs`). Swap the
+`container` job for:
 
 ```yaml
 container:
   stage: build
-  image: quay.io/buildah/stable
+  image: docker:27-cli
+  services: ["docker:27-dind"]
   variables:
-    STORAGE_DRIVER: vfs           # overlay needs privileges buildah will not have
-    BUILDAH_FORMAT: oci
+    DOCKER_HOST: tcp://docker:2376
+    DOCKER_TLS_CERTDIR: /certs
+    DOCKER_TLS_VERIFY: 1
+    DOCKER_CERT_PATH: /certs/client
   script:
-    - buildah bud -f containerfile -t "asr-server:$CI_COMMIT_SHORT_SHA" .
-    - buildah run "asr-server:$CI_COMMIT_SHORT_SHA" -- python serve.py --help
-    - |
-      if [ -n "$CI_REGISTRY" ]; then
-        buildah login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
-        buildah push "asr-server:$CI_COMMIT_SHORT_SHA" \
-          "docker://$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
-      fi
+    - docker build -f containerfile -t "asr-server:$CI_COMMIT_SHORT_SHA" .
 ```
 
-`STORAGE_DRIVER: vfs` is slower than overlay but works unprivileged. If you have
-a `shell` executor with podman installed, `podman build -f containerfile` needs
-no special configuration at all.
+with, in `config.toml`:
+
+```toml
+[runners.docker]
+  privileged = true          # required for docker:dind
+  volumes = ["/certs/client", "/cache"]
+```
+
+`gitlab-runner register` does not set `privileged`, and it grants the job
+effective root on the host — which is why buildah is the default here.
+
+If you have a `shell` executor with podman installed, `podman build -f
+containerfile` needs no special configuration at all.
 
 ### If the runner is on the GitLab host itself
 
@@ -175,6 +180,19 @@ sudo cp root.crt /etc/gitlab-runner/certs/gitlab.example.com.crt
 ```
 
 Then `sudo gitlab-runner restart`.
+
+#### With a rootless podman runner
+
+The source path is opened by the podman user, not by root, so the file has to be
+readable by that uid:
+
+```bash
+sudo chmod 644 /etc/gitlab-runner/certs/ca.crt
+sudo -u "#958" cat /etc/gitlab-runner/certs/ca.crt >/dev/null && echo "readable"
+```
+
+A mount whose source the runtime cannot read fails the job with a confusing
+error, or silently produces an empty file.
 
 On naming: the host-side filename only has to match the hostname if you rely on
 the runner's automatic lookup — `<hostname>.crt`, base hostname with **no port**,

@@ -38,46 +38,45 @@ test:
 # build -- image build, and a push only if this GitLab has its registry enabled
 # ---------------------------------------------------------------------------
 
+# Built with buildah rather than docker:dind, because dind needs a privileged
+# runner and rootless podman cannot provide one. buildah builds unprivileged,
+# and produces OCI images, which is what containerfile targets anyway.
+#
+# On a privileged docker-executor runner, the dind variant in docs/ci.md is
+# faster (overlay storage instead of vfs).
 container:
   stage: build
-  image: docker:27-cli
-  services:
-    - docker:27-dind
+  image: quay.io/buildah/stable
   variables:
-    DOCKER_HOST: tcp://docker:2376
-    DOCKER_TLS_CERTDIR: /certs
-    DOCKER_TLS_VERIFY: 1
-    DOCKER_CERT_PATH: /certs/client
-  before_script:
-    # CI_REGISTRY only exists when the GitLab Container Registry is enabled.
-    # Without it the image is still built and smoke-tested, just not pushed.
-    - |
-      if [ -n "$CI_REGISTRY" ]; then
-        echo "registry enabled: $CI_REGISTRY_IMAGE"
-        echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
-      else
-        echo "no registry configured -- building and smoke-testing only"
-      fi
+    # overlay needs privileges buildah will not have here; vfs is slower but works.
+    STORAGE_DRIVER: vfs
+    # chroot isolation avoids nested user namespaces, which unprivileged
+    # containers are usually not allowed to create.
+    BUILDAH_ISOLATION: chroot
+    BUILDAH_FORMAT: oci
   script:
-    - docker build -f containerfile -t "asr-server:$CI_COMMIT_SHORT_SHA" .
+    - buildah bud -f containerfile -t "asr-server:$CI_COMMIT_SHORT_SHA" .
 
     # Smoke test. The image has no model weights, so it cannot transcribe here;
     # what this proves is that every dependency resolved and the package imports
     # -- which is the failure mode a build actually catches.
-    - docker run --rm "asr-server:$CI_COMMIT_SHORT_SHA" python serve.py --help
-    - docker run --rm "asr-server:$CI_COMMIT_SHORT_SHA" python fetch_models.py --help
-    - docker run --rm "asr-server:$CI_COMMIT_SHORT_SHA" python -c "import asr.server; print('imports ok')"
-
     - |
-      if [ -n "$CI_REGISTRY" ]; then
-        docker tag "asr-server:$CI_COMMIT_SHORT_SHA" "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
-        docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
-        if [ "$CI_COMMIT_BRANCH" = "$CI_DEFAULT_BRANCH" ]; then
-          docker tag "asr-server:$CI_COMMIT_SHORT_SHA" "$CI_REGISTRY_IMAGE:latest"
-          docker push "$CI_REGISTRY_IMAGE:latest"
-        fi
-        if [ -n "$CI_COMMIT_TAG" ]; then
-          docker tag "asr-server:$CI_COMMIT_SHORT_SHA" "$CI_REGISTRY_IMAGE:$CI_COMMIT_TAG"
-          docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_TAG"
-        fi
+      ctr=$(buildah from "asr-server:$CI_COMMIT_SHORT_SHA")
+      buildah run "$ctr" -- python serve.py --help
+      buildah run "$ctr" -- python fetch_models.py --help
+      buildah run "$ctr" -- python -c "import asr.server; print('imports ok')"
+      buildah rm "$ctr"
+
+    # CI_REGISTRY only exists when the GitLab Container Registry is enabled.
+    # Without it the image is built and smoke-tested, just not pushed.
+    - |
+      if [ -z "$CI_REGISTRY" ]; then
+        echo "no registry configured -- built and smoke-tested only"
+        exit 0
       fi
+      buildah login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+      push() { buildah push "asr-server:$CI_COMMIT_SHORT_SHA" "docker://$CI_REGISTRY_IMAGE:$1"; }
+      push "$CI_COMMIT_SHORT_SHA"
+      [ "$CI_COMMIT_BRANCH" = "$CI_DEFAULT_BRANCH" ] && push latest
+      [ -n "$CI_COMMIT_TAG" ] && push "$CI_COMMIT_TAG"
+      true
