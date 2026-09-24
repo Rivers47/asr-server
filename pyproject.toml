@@ -2,7 +2,7 @@
 name = "asmr-asr-server"
 version = "1.0.0"
 description = "HTTP transcription server: an ASMR-tuned VAD driving faster-whisper"
-requires-python = ">=3.10"
+requires-python = ">=3.14"
 
 # Deliberately short. faster-whisper pulls ctranslate2, tokenizers, huggingface-hub
 # and av; onnxruntime runs the VAD graph; pyjson5 exists only so the config file
@@ -10,7 +10,7 @@ requires-python = ">=3.10"
 dependencies = [
     "faster-whisper>=1.0.0",
     "ctranslate2>=4.7.1",      # 4.7.1+ for the pruned-vocab ja models
-    "onnxruntime>=1.17,<1.24", # 1.23.2 is the last with cp310 wheels
+    "onnxruntime>=1.17",       # upper bound dropped with the 3.10 floor
     "numpy>=2.0",
     "pyjson5>=1.6.0",
 ]
@@ -22,7 +22,12 @@ dev = ["ruff", "mypy"]
 package = false
 
 [tool.ruff]
-target-version = "py310"
+# Deliberately one behind requires-python. At py314 the formatter rewrites
+# `except (OSError, ValueError):` as `except OSError, ValueError:` (PEP 758),
+# which is valid 3.14 but reads exactly like Python 2's `except E, name:` --
+# where the second element was the bound variable, not a second exception type.
+# Nothing is gained by adopting it, and a misreading is a silent behaviour bug.
+target-version = "py313"
 line-length = 120
 
 [tool.ruff.lint]
@@ -41,7 +46,7 @@ known-first-party = ["asr"]
 quote-style = "double"
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.14"
 warn_unused_ignores = true
 allow_untyped_defs = true
 ignore_missing_imports = true

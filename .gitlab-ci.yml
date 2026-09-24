@@ -15,7 +15,7 @@ default:
 
 lint:
   stage: check
-  image: python:3.10-slim
+  image: python:3.14-slim
   script:
     - pip install --quiet ruff==0.16.8 mypy==1.18.2
     - ruff check .
@@ -26,7 +26,7 @@ lint:
 
 test:
   stage: check
-  image: python:3.10-slim
+  image: python:3.14-slim
   script:
     # ctranslate2, faster-whisper and onnxruntime are all imported lazily or
     # behind guards, so the suite runs without them -- and without the 3 GB of

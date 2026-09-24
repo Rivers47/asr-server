@@ -2,7 +2,7 @@
 
 Two stages in `.gitlab-ci.yml`:
 
-- **check** — `lint` and `test`. Plain `python:3.10-slim`, no container runtime,
+- **check** — `lint` and `test`. Plain `python:3.14-slim`, no container runtime,
   no model weights, no privileges. If these pass, your runner works.
 - **build** — builds the image from `containerfile`, smoke-tests it, and pushes
   only if this GitLab has a registry.
@@ -44,7 +44,7 @@ sudo cat /etc/gitlab-runner/config.toml
 ```
 
 **`check` needs only** `executor = "docker"` (any image) or a `shell` executor
-with Python 3.10+.
+with Python 3.14+.
 
 **`build` as written uses buildah**, which builds unprivileged — so it works on a
 rootless podman runner, where docker-in-docker cannot. A rootless runner looks
@@ -95,7 +95,7 @@ containerfile` needs no special configuration at all.
 
 ### If the runner is on the GitLab host itself
 
-`docker:dind` pulls `python:3.10-slim` and `ghcr.io/astral-sh/uv` from the
+`docker:dind` pulls `python:3.14-slim` and `ghcr.io/astral-sh/uv` from the
 internet. Behind a proxy or an air-gapped network the build fails on the first
 `FROM`; mirror both into your own registry and rewrite the two `FROM`/`COPY
 --from` lines in `containerfile`.

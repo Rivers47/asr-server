@@ -18,7 +18,7 @@
 #
 #   podman run --rm -v ./models:/srv/models:Z asmr-asr python fetch_models.py
 
-FROM docker.io/library/python:3.10-slim
+FROM docker.io/library/python:3.14-slim
 
 # uv resolves from the committed lock. Pinned so a rebuild cannot drift.
 COPY --from=ghcr.io/astral-sh/uv:0.11 /uv /usr/local/bin/uv

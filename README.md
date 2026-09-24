@@ -210,6 +210,12 @@ silent input, and the resulting speech probabilities compared.
 No frame changes classification, so segmentation is unchanged. This also deletes
 `models/whisper-base/`, which existed only to carry that extractor's config.
 
+**Python 3.14 floor.** It drops `sympy`, `mpmath`, `coloredlogs`,
+`exceptiongroup`, `tomli`, `humanfriendly` and `pyreadline3` from the lock —
+backports and compat shims that older interpreters or older `onnxruntime` needed
+— and lifts `onnxruntime` from 1.23.2 to 1.30.0, whose `<1.24` cap existed only
+because that was the last release with cp310 wheels.
+
 **No `librosa` (−347 MB).** It pulled numba → llvmlite (172 MB), scipy (119 MB),
 and scikit-learn (34 MB) to serve one resample call that never fired, since every
 caller decodes at 16 kHz. Mismatched input is now a `ValueError` rather than a
