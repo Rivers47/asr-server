@@ -233,8 +233,13 @@ model; any CTranslate2 Whisper model works.
 ```bash
 python -m unittest discover -s tests -t .
 ruff check . && ruff format --check .
-mypy --config-file pyproject.toml asr serve.py fetch_models.py
+mypy --config-file pyproject.toml --no-site-packages asr serve.py fetch_models.py
 ```
+
+`.gitlab-ci.yml` runs those three in a `check` stage, then builds the container
+and smoke-tests it. The push to a registry is conditional — it happens only if
+GitLab's Container Registry is enabled, so CI is useful without one. See
+[docs/ci.md](docs/ci.md) for runner and registry setup.
 
 ## Credits
 
