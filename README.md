@@ -69,7 +69,7 @@ extension survives.
   "duration_after_vad": 6.25,
   "language": "ja",
   "task": "transcribe",
-  "hotwords": "柚姫",
+  "hotwords": "父さま",
   "beam_size": 5,
   "processing_time": 8.1
 }
@@ -203,7 +203,7 @@ boundary acoustically, ahead of decoding, breaks that loop, and a per-chunk
 parameter is accepted. The flags on `serve.py --help` override the file.
 
 `hotwords` ships empty, since the server takes arbitrary uploads. Set it in the
-config as a process-wide default (`"hotwords": "柚姫, 父さま"`), or per request
+config as a process-wide default (`"hotwords": "空イキ"`), or per request
 with the `hotwords` query parameter.
 
 ### CPU threads
