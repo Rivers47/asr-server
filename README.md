@@ -51,7 +51,7 @@ Everything else — language, task, VAD parameters, chunking — is process-wide
 
 ```bash
 curl -X POST --data-binary @track.opus \
-     "http://127.0.0.1:8000/transcribe?hotwords=%E6%9F%9A%E5%A7%AB,%E7%88%B6%E3%81%95%E3%81%BE&beam_size=5"
+     "http://127.0.0.1:8000/transcribe?hotwords=%E8%8A%B1%E5%AD%90,%E3%81%8A%E5%85%84%E3%81%95%E3%82%93&beam_size=5"
 ```
 
 Both are echoed in the JSON response so a caller can confirm what applied, and
@@ -63,13 +63,13 @@ extension survives.
 
 ```json
 {
-  "text": "こんにちはお父さま",
+  "text": "こんにちはありがとう",
   "segments": [{ "start": 1.23, "end": 4.56, "text": "こんにちは" }],
   "duration": 12.5,
   "duration_after_vad": 6.25,
   "language": "ja",
   "task": "transcribe",
-  "hotwords": "父さま",
+  "hotwords": "花子",
   "beam_size": 5,
   "processing_time": 8.1
 }

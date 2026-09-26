@@ -129,7 +129,7 @@ class FakeService:
             raise TranscriptionError("server busy: 8 request(s) already queued")
         if self.mode == "boom":
             raise RuntimeError("ffmpeg exploded")
-        return ([Segment(1_230, 4_560, "こんにちは"), Segment(4_560, 7_000, "お父さま")], 12.5, 6.25)
+        return ([Segment(1_230, 4_560, "こんにちは"), Segment(4_560, 7_000, "ありがとう")], 12.5, 6.25)
 
 
 class FakeSocket:
@@ -224,7 +224,7 @@ class TranscribeEndpointTest(HandlerTestCase):
         self.assertEqual(self.service.seen_bytes, AUDIO)
         self.assertTrue(self.service.seen_path.endswith(".wav"))
         self.assertEqual(payload["segments"][0], {"start": 1.23, "end": 4.56, "text": "こんにちは"})
-        self.assertEqual(payload["text"], "こんにちはお父さま")
+        self.assertEqual(payload["text"], "こんにちはありがとう")
         self.assertEqual(payload["duration"], 12.5)
         self.assertEqual(payload["duration_after_vad"], 6.25)
         self.assertIn("processing_time", payload)
@@ -247,7 +247,7 @@ class TranscribeEndpointTest(HandlerTestCase):
         self.assertTrue(self.service.seen_path.endswith(".opus"))
 
     def test_subtitle_formats(self):
-        for fmt, marker in (("vtt", "WebVTT"), ("txt", "こんにちは\nお父さま"), ("lrc", "[00:01.23]こんにちは")):
+        for fmt, marker in (("vtt", "WebVTT"), ("txt", "こんにちは\nありがとう"), ("lrc", "[00:01.23]こんにちは")):
             with self.subTest(fmt=fmt):
                 status, _, body = self.request("POST", f"/transcribe?format={fmt}", AUDIO, AUDIO_HEADERS)
                 self.assertEqual(status, 200)
@@ -329,8 +329,8 @@ class ParseOverridesTest(unittest.TestCase):
 
     def test_hotwords_and_beam_size(self):
         self.assertEqual(
-            parse_overrides({"hotwords": ["柚姫, 父さま"], "beam_size": ["5"]}),
-            {"hotwords": "柚姫, 父さま", "beam_size": 5},
+            parse_overrides({"hotwords": ["花子, お兄さん"], "beam_size": ["5"]}),
+            {"hotwords": "花子, お兄さん", "beam_size": 5},
         )
 
     def test_empty_hotwords_is_kept_so_it_can_clear_the_config(self):
@@ -360,12 +360,12 @@ class ParseOverridesTest(unittest.TestCase):
 class OverrideEndpointTest(HandlerTestCase):
     def test_overrides_reach_the_service_and_are_echoed(self):
         status, _, body = self.request(
-            "POST", "/transcribe?hotwords=%E6%9F%9A%E5%A7%AB&beam_size=3", AUDIO, AUDIO_HEADERS
+            "POST", "/transcribe?hotwords=%E8%8A%B1%E5%AD%90&beam_size=3", AUDIO, AUDIO_HEADERS
         )
         self.assertEqual(status, 200)
-        self.assertEqual(self.service.seen_overrides, {"hotwords": "柚姫", "beam_size": 3})
+        self.assertEqual(self.service.seen_overrides, {"hotwords": "花子", "beam_size": 3})
         payload = json.loads(body)
-        self.assertEqual(payload["hotwords"], "柚姫")
+        self.assertEqual(payload["hotwords"], "花子")
         self.assertEqual(payload["beam_size"], 3)
 
     def test_without_overrides_the_response_echoes_the_process_config(self):
