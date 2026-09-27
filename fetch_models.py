@@ -24,7 +24,8 @@ ASR_FILES = ["config.json", "model.bin", "preprocessor_config.json", "tokenizer.
 
 # ASMR-tuned VAD: whisper-base encoder + 2 decoder layers, 20 ms frame resolution.
 VAD_REPO = "TransWithAI/Whisper-Vad-EncDec-ASMR-onnx"
-VAD_FILES = {"whisper_vad.onnx": "whisper_vad.onnx", "whisper_vad_metadata.json": "whisper_vad_metadata.json"}
+# remote name -> local name; vad_manager looks for the whisper_vad.* spellings.
+VAD_FILES = {"model.onnx": "whisper_vad.onnx", "model_metadata.json": "whisper_vad_metadata.json"}
 
 
 def remote_size(url: str) -> int | None:

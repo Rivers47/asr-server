@@ -54,6 +54,38 @@ class DependencyHygieneTest(unittest.TestCase):
         self.assertIn('raise ValueError(f"expected {self.sample_rate} Hz audio', source)
 
 
+class FetchModelsTest(unittest.TestCase):
+    """The local filenames fetch_models writes must be the ones the code opens."""
+
+    @staticmethod
+    def _fetch_module():
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("fetch_models", ROOT / "fetch_models.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_vad_local_names_match_what_the_pipeline_opens(self):
+        fetch = self._fetch_module()
+        pipeline = (ROOT / "asr" / "pipeline.py").read_text(encoding="utf-8")
+        for local in fetch.VAD_FILES.values():
+            with self.subTest(file=local):
+                self.assertIn(f"models/{local}", pipeline)
+
+    def test_asr_list_includes_the_file_startup_checks_for(self):
+        fetch = self._fetch_module()
+        self.assertIn("model.bin", fetch.ASR_FILES)
+
+    def test_vad_remote_and_local_names_differ(self):
+        """The repo publishes model.onnx; the pipeline wants whisper_vad.onnx."""
+        fetch = self._fetch_module()
+        self.assertEqual(
+            fetch.VAD_FILES,
+            {"model.onnx": "whisper_vad.onnx", "model_metadata.json": "whisper_vad_metadata.json"},
+        )
+
+
 class ParserCoverageTest(unittest.TestCase):
     def test_parser_defines_every_attribute_the_pipeline_reads(self):
         """Derived from the source, so a new args.* in pipeline.py fails here first."""
