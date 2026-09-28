@@ -22,7 +22,7 @@ lint:
     - ruff format --check .
     # --no-site-packages keeps the result independent of which numpy stubs the
     # image happens to resolve.
-    - mypy --config-file pyproject.toml --no-site-packages asr serve.py fetch_models.py
+    - mypy --config-file pyproject.toml --no-site-packages asr serve.py fetch_models.py ov_backend.py
 
 test:
   stage: check

@@ -106,7 +106,7 @@ def prompt_from_hotwords(processor, hotwords: str) -> Any:
     return prompt_ids
 
 
-def _decode_path(audio_path: str) -> np.ndarray:
+def _decode_path(audio_path: str | os.PathLike[Any]) -> np.ndarray:
     try:
         from faster_whisper.audio import decode_audio
     except Exception as e:
