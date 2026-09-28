@@ -42,24 +42,10 @@ ENV UV_PROJECT_ENVIRONMENT=/srv/.venv \
     PYTHONDONTWRITEBYTECODE=1
 
 # Dependency layer first: rebuilt only when the lock changes, not on every edit.
+# The openvino extra carries the OpenVINO stack, and pyproject.toml routes torch and
+# torchvision to PyTorch's CPU index, so nothing here pulls a CUDA build.
 COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-dev
-
-# The OpenVINO stack is not in pyproject.toml, so it is pinned here to the versions
-# the benchmark was validated against. torch comes from the CPU index: optimum-intel
-# imports it, and the default index serves the CUDA build. optimum-intel declares
-# torchvision, which is removed because it arrives from the default index and fails
-# to load against a CPU torch build with "operator torchvision::nms does not exist".
-RUN uv pip install --python /srv/.venv/bin/python \
-        torch==2.14.0+cpu --index-url https://download.pytorch.org/whl/cpu \
- && uv pip install --python /srv/.venv/bin/python \
-        "openvino==2026.4.0" \
-        "openvino-tokenizers==2026.4.0.0" \
-        "optimum-intel==2.2.0" \
-        "optimum==2.3.0" \
-        "transformers==5.5.4" \
-        "nncf==3.4.0" \
- && uv pip uninstall --python /srv/.venv/bin/python torchvision
+RUN uv sync --frozen --no-dev --extra openvino
 
 COPY asr/ asr/
 COPY serve.py fetch_models.py generation_config.json5 ov_backend.py ./

@@ -17,9 +17,34 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["ruff", "mypy"]
+# The OpenVINO image only: uv sync --extra openvino. transformers and torch are
+# what the short list above exists to avoid, so they stay opt-in. ov_backend.py is
+# the only module that imports them, and it sits outside the asr package.
+openvino = [
+    "optimum-intel[openvino]>=2.2.0",  # brings optimum, openvino, openvino-tokenizers, nncf
+    "transformers>=5.5,<5.6",
+    "torch>=2.14",
+    # A hard requirement of optimum-intel, declared here only so the index below
+    # applies to it: uv sources bind to direct dependencies, not transitive ones.
+    "torchvision>=0.29",
+]
 
 [tool.uv]
 package = false
+
+# torch and torchvision come from PyTorch's CPU index. The default index serves the
+# CUDA build -- gigabytes of unused libraries on an Intel host -- and a torchvision
+# resolved from there fails against it with "operator torchvision::nms does not
+# exist". explicit = true keeps this index out of resolution for everything else,
+# so no other package can be shadowed by it.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }
 
 [tool.ruff]
 # Matches requires-python. Note this makes the formatter adopt PEP 758

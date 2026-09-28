@@ -60,6 +60,31 @@ class DependencyHygieneTest(unittest.TestCase):
         declared = {re.split(r"[><=~!\[]", line.strip().strip('",'))[0] for line in block.splitlines() if '"' in line}
         self.assertEqual(declared, {"faster-whisper", "ctranslate2", "onnxruntime", "numpy", "pyjson5"})
 
+    def test_the_openvino_stack_is_opt_in(self):
+        """The heavy stack may appear in the openvino extra, never in the default install."""
+        import tomllib
+
+        data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+
+        def names(specs):
+            return {re.split(r"[><=~!\[;]", spec.strip())[0].lower() for spec in specs}
+
+        self.assertEqual(BANNED & names(data["project"]["dependencies"]), set())
+        extra = names(data["project"]["optional-dependencies"]["openvino"])
+        self.assertLessEqual({"optimum-intel", "transformers", "torch"}, extra)
+
+    def test_torch_is_pinned_to_the_cpu_index(self):
+        """From the default index torch is the CUDA build, and torchvision then fails to load."""
+        import tomllib
+
+        data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        indexes = {entry["name"]: entry for entry in data["tool"]["uv"]["index"]}
+        self.assertEqual(indexes["pytorch-cpu"]["url"], "https://download.pytorch.org/whl/cpu")
+        self.assertTrue(indexes["pytorch-cpu"]["explicit"], "the index must not shadow other packages")
+        for package in ("torch", "torchvision"):
+            with self.subTest(package=package):
+                self.assertEqual(data["tool"]["uv"]["sources"][package]["index"], "pytorch-cpu")
+
     def test_vad_uses_the_faster_whisper_extractor(self):
         source = (ROOT / "asr" / "vad_manager.py").read_text(encoding="utf-8")
         self.assertIn("from faster_whisper.feature_extractor import FeatureExtractor", source)

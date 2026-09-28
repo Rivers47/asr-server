@@ -354,6 +354,31 @@ silent reinterpretation.
 
 `tests/test_dependencies.py` fails if either returns.
 
+**The `openvino` extra is the one exception, and it is opt-in.**
+`uv sync --extra openvino` installs what `ov_backend.py` needs — optimum-intel,
+transformers, torch — taking the image from 31 packages to 63. `nncf`, which
+optimum-intel hard-depends on, brings back `scipy` and `scikit-learn`. The default
+install is untouched: `uv sync` still resolves the same five.
+
+`uv.lock` is universal, though, so one version per package has to satisfy both
+images. Three of the base graph's transitive packages sit lower than they would
+alone:
+
+| package | pinned | would be | capped by |
+|---|---|---|---|
+| `huggingface-hub` | 1.21.0 | 1.32.0 | `optimum-intel` needs `<1.22` |
+| `numpy` | 2.4.6 | 2.5.3 | `nncf` needs `<2.5.0` |
+| `tokenizers` | 0.22.2 | 0.23.2 | `transformers` needs `<=0.23.0` |
+
+All three are transitive dependencies of faster-whisper, and the CPU image runs on
+them unchanged. Dropping the extra from `pyproject.toml` would lift the caps.
+
+`torch` and `torchvision` are routed to PyTorch's CPU index by
+`[tool.uv.sources]`. From the default index torch is the CUDA build — gigabytes of
+libraries an Intel host never loads — and a torchvision resolved alongside it fails
+with `operator torchvision::nms does not exist`, which blocks
+`from optimum.intel import ...` outright.
+
 ## Models
 
 Fetched once, explicitly. There is no lazy download at first request, and no
