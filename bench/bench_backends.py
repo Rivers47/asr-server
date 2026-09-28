@@ -38,6 +38,31 @@ import numpy as np
 SAMPLE_RATE = 16_000
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
+MAX_NEW_TOKENS = 440
+# faster-whisper truncates hotwords to max_length // 2 - 1 tokens; the transformers
+# backends are capped the same way so every backend sees the same hotword content.
+HOTWORDS_TOKEN_CAP = 223
+# generate() prepends start-of-transcript, language and task tokens to the prompt.
+SPECIAL_TOKEN_SLOTS = 4
+
+
+def prompt_from_hotwords(processor, hotwords: str, max_target_positions: int):
+    """Hotwords as Whisper prompt tokens, with the max_new_tokens they leave room for.
+
+    faster-whisper takes hotwords as a string and manages the token budget itself.
+    transformers counts prompt + special tokens + max_new_tokens against
+    max_target_positions and raises when they exceed it, so the budget is computed
+    here rather than passing a constant.
+    """
+    if not hotwords:
+        return None, MAX_NEW_TOKENS
+    prompt_ids = processor.get_prompt_ids(hotwords, return_tensors="pt")
+    if len(prompt_ids) - 1 > HOTWORDS_TOKEN_CAP:  # index 0 is <|startofprev|>
+        prompt_ids = prompt_ids[: HOTWORDS_TOKEN_CAP + 1]
+    budget = max_target_positions - len(prompt_ids) - SPECIAL_TOKEN_SLOTS
+    return prompt_ids, max(1, min(MAX_NEW_TOKENS, budget))
+
+
 # backend -> (import probe, human description, install hint)
 BACKENDS = {
     "ct2-cpu": ("faster_whisper", "CTranslate2 on CPU (what the server runs today)", "uv sync"),
@@ -180,6 +205,7 @@ def run_ct2(chunks: list[np.ndarray], device: str, args) -> tuple[float, list[st
             beam_size=args.beam_size,
             vad_filter=False,  # chunking is fixed up front; isolate the decoder
             condition_on_previous_text=False,
+            hotwords=args.hotwords or None,
         )
         return "".join(segment.text for segment in segments).strip()
 
@@ -204,6 +230,10 @@ def run_torch(chunks: list[np.ndarray], device: str, args) -> tuple[float, list[
         getattr(torch, device).synchronize()
     load_s = time.perf_counter() - started
 
+    prompt_ids, max_new_tokens = prompt_from_hotwords(
+        processor, args.hotwords, getattr(model.config, "max_target_positions", 448)
+    )
+
     def decode(audio: np.ndarray) -> str:
         features = processor(audio, sampling_rate=SAMPLE_RATE, return_tensors="pt").input_features
         with torch.inference_mode():
@@ -212,7 +242,8 @@ def run_torch(chunks: list[np.ndarray], device: str, args) -> tuple[float, list[
                 num_beams=args.beam_size,
                 language=args.language,
                 task="transcribe",
-                max_new_tokens=440,
+                max_new_tokens=max_new_tokens,
+                prompt_ids=prompt_ids,
             )
         if device != "cpu":
             getattr(torch, device).synchronize()
@@ -235,6 +266,10 @@ def run_openvino(chunks: list[np.ndarray], device: str, args) -> tuple[float, li
     )
     load_s = time.perf_counter() - started
 
+    prompt_ids, max_new_tokens = prompt_from_hotwords(
+        processor, args.hotwords, getattr(model.config, "max_target_positions", 448)
+    )
+
     def decode(audio: np.ndarray) -> str:
         features = processor(audio, sampling_rate=SAMPLE_RATE, return_tensors="pt").input_features
         tokens = model.generate(
@@ -242,7 +277,8 @@ def run_openvino(chunks: list[np.ndarray], device: str, args) -> tuple[float, li
             num_beams=args.beam_size,
             language=args.language,
             task="transcribe",
-            max_new_tokens=440,
+            max_new_tokens=max_new_tokens,
+            prompt_ids=prompt_ids,
         )
         return processor.batch_decode(tokens, skip_special_tokens=True)[0].strip()
 
@@ -373,6 +409,13 @@ def main(argv: list[str] | None = None) -> int:
         "The curve is steep on both sides of the physical core count, so sweep this before comparing backends.",
     )
     parser.add_argument("--language", default="ja")
+    parser.add_argument(
+        "--hotwords",
+        default="",
+        help="domain vocabulary to bias decoding toward. Passed to CTranslate2 as hotwords= and to "
+        "the transformers backends as prompt_ids, truncated to the same token cap. The server runs "
+        "with hotwords set, so comparisons made without this flag do not reflect production.",
+    )
     parser.add_argument("--beam-size", type=int, default=5)
     parser.add_argument("--window", type=float, default=30.0, help="chunk length in seconds (default: 30)")
     parser.add_argument("--limit", type=int, default=0, help="use only the first N chunks (0 = all)")
@@ -460,6 +503,8 @@ def main(argv: list[str] | None = None) -> int:
             ]  # fmt: skip
             if args.ov_model:
                 command += ["--ov-model", args.ov_model]
+            if args.hotwords:
+                command += ["--hotwords", args.hotwords]
             if not args.warmup:
                 command.append("--no-warmup")
 

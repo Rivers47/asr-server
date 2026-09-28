@@ -32,7 +32,65 @@ python bench/bench_backends.py four_short.opus \
 ```
 
 Useful flags: `--limit N` (first N chunks only, for a quick loop), `--beam-size`,
-`--compute-type`, `--window`, `--no-vad`.
+`--compute-type`, `--window`, `--no-vad`, `--hotwords`.
+
+## Hotwords
+
+The server runs with hotwords set, so a comparison without them measures a
+configuration you do not deploy. Pass the same list to every backend with
+`--hotwords`:
+
+```bash
+python bench/bench_backends.py four_short.opus \
+    --backends ct2-cpu,openvino-gpu --ov-model bench/ov-whisper-ja \
+    --hotwords "$(cat hotwords.txt)" --show-text
+```
+
+`hotwords` is faster-whisper's own parameter, and it is prompt injection:
+`tokenizer.encode(" " + hotwords)` appended to the decoder prompt, truncated to
+`max_length // 2 - 1` = 223 tokens. The transformers backends (`torch-*`,
+`openvino-*`) have no such parameter, so the harness converts the string with
+`WhisperProcessor.get_prompt_ids` and passes it as `prompt_ids` — the same
+mechanism, reachable because optimum-intel dispatches Whisper to
+`_OVModelForWhisper(OVModelForSpeechSeq2Seq, WhisperForConditionalGeneration)`.
+
+Two differences the harness absorbs, and that a server port would have to as well:
+
+- transformers counts prompt + special tokens + `max_new_tokens` against the model's
+  448 `max_target_positions` and **raises** rather than truncating, so
+  `max_new_tokens` is computed per run instead of fixed.
+- the prompt is capped at the same 223 tokens faster-whisper uses, so every backend
+  sees identical hotword content.
+
+Per-chunk `generate()` calls re-assert the prompt at the head of every chunk, which
+is the behaviour the server's smart-split path relies on. A whole-file call would
+need `prompt_condition_type="all-segments"` and `condition_on_prev_tokens`.
+
+Output is realtime factor (audio seconds per wall second — higher is faster),
+model load time, peak RSS, and a character-level agreement ratio against the
+first backend listed.
+
+**Read the agreement ratio.** A fast backend that disagrees with the baseline is
+not a win. Use `--show-text` and look at the transcripts before believing a
+number.
+
+## Separate environments per backend
+
+torch-XPU and CTranslate2 in one environment is the oneAPI/MKL conflict this
+harness is built to avoid. Give each its own venv and point the harness at them:
+
+```bash
+python -m venv ~/venv-xpu
+~/venv-xpu/bin/pip install torch --index-url https://download.pytorch.org/whl/xpu
+~/venv-xpu/bin/pip install transformers numpy
+
+python bench/bench_backends.py four_short.opus \
+    --backends ct2-cpu,torch-xpu \
+    --python torch-xpu=~/venv-xpu/bin/python
+```
+
+The chunk plan is still built once, in the parent, and passed to every worker as
+a `.npy` file — so separate environments do not change what is being compared.
 
 ## Backend setup
 
@@ -237,6 +295,9 @@ as described above:
 |---|---|---|---|---|---|
 | `ct2-cpu` (int8, beam 5) | 4.3 s | 58.1 s | 2.47× | 3050 MB | 1.00 |
 | `openvino-cpu` (fp32, beam 5) | 13.7 s | 128.8 s | 1.12× | 15818 MB | 0.740 |
+
+Both tables above were measured **without** `--hotwords`, so neither reflects the
+server's real configuration. Re-run with it before drawing conclusions.
 
 OpenVINO is 2.2× slower at 5× the memory, but the comparison is not
 precision-matched: the baseline is int8 and the IR is fp32. Export with
