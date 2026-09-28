@@ -186,7 +186,22 @@ VAD on the CPU. The CPU image is unchanged and still uses CTranslate2.
 podman build -t asmr-asr-ov --format oci -f containerfile.openvino .
 podman run --rm -v ./models:/srv/models:Z asmr-asr-ov python fetch_models.py --only vad
 podman run --rm --device /dev/dri --group-add keep-groups \
-    -v ./models:/srv/models:ro,Z -p 127.0.0.1:8000:8000 asmr-asr-ov
+    -v ./models:/srv/models:Z -p 127.0.0.1:8000:8000 asmr-asr-ov
+```
+
+Note the volume is **read-write** here, where the CPU image mounts it `ro`. On a GPU
+device optimum-intel sets OpenVINO's `CACHE_DIR` to a `model_cache/` directory
+*inside* the IR directory and the compiled kernels are written there — around 1.5 GB
+beside 1.6 GB of int8 weights. Mounting read-only is not an error: OpenVINO skips
+caching silently and the model still loads, but every start pays the kernel
+compilation again.
+
+That cache is specific to the device and driver version, so it regenerates after a
+driver upgrade and is worth excluding when copying an IR directory to another
+machine:
+
+```bash
+rsync -a --exclude model_cache models/ov-int8/ arcbox:/srv/models/ov-int8/
 ```
 
 `--device /dev/dri` and `--group-add keep-groups` are both required. Without them
@@ -216,6 +231,12 @@ The precision names a directory under the models volume, so both can be present:
 models/ov-int8/     1.6 GB of weights
 models/ov-fp32/     6.2 GB of weights
 ```
+
+**One volume serves both images.** The CTranslate2 files stay at the root of
+`models/` and the IR sits in a subdirectory, so nothing collides: the OpenVINO
+backend reads only inside `models/ov-*`, and startup checks for the IR's `.xml`
+pair rather than `model.bin`. Both containers can run against the same mount at
+once, sharing `whisper_vad.onnx`, which is CPU-side either way.
 
 `--model_name_or_path` overrides that path directly. Build the IR outside the
 image; `bench/README.md` covers the export, including the Python 3.14 issue that
