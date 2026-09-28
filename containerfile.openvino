@@ -69,6 +69,10 @@ COPY serve.py fetch_models.py generation_config.json5 ov_backend.py ./
 #
 # ASR_BACKEND, OV_PRECISION and OV_DEVICE are the defaults for --backend,
 # --ov_precision and --ov_device. Precision selects models/ov-int8 or models/ov-fp32.
+#
+# OV_IDLE_UNLOAD_S defaults to 0: the model is compiled at startup and holds device
+# memory until the container stops. Set it to a number of seconds when the GPU is
+# shared, and the model loads on first request and is released again once idle.
 ENV ASR_BACKEND=openvino \
     OV_PRECISION=int8 \
     OV_DEVICE=GPU

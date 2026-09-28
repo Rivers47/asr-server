@@ -16,8 +16,11 @@ The IR is built outside the server -- see bench/README.md -- and selected by
 directory: models/ov-int8 or models/ov-fp32.
 """
 
+import gc
 import logging
 import os
+import threading
+import time
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
@@ -117,15 +120,76 @@ def _spans_from_clip_timestamps(clip_timestamps: Any, total_s: float) -> list[tu
 
 
 class OpenVinoWhisperModel:
-    """An exported OpenVINO Whisper IR, shaped like faster_whisper.WhisperModel."""
+    """An exported OpenVINO Whisper IR, shaped like faster_whisper.WhisperModel.
 
-    def __init__(self, model_dir: str, *, device: str = "GPU", ov_config: dict[str, Any] | None = None):
+    ``idle_unload_s`` decides when device memory is held. At 0 the model is compiled
+    in the constructor and stays resident for the life of the process. Above 0 it is
+    compiled on the first request and released again once idle for that long, which
+    is what a GPU shared with other containers wants: an idle server holds no device
+    memory, so nothing else has to be evicted to make room for it.
+
+    One lock guards compile, decode and release together, so the idle timer can never
+    unload a model mid-request.
+    """
+
+    def __init__(
+        self,
+        model_dir: str,
+        *,
+        device: str = "GPU",
+        ov_config: dict[str, Any] | None = None,
+        idle_unload_s: float = 0.0,
+    ):
         model_cls, processor_cls = _require_openvino()
         self.model_dir = model_dir
         self.device = (device or "GPU").strip().upper()
+        self.ov_config = dict(ov_config or {})
+        self.idle_unload_s = max(0.0, float(idle_unload_s or 0.0))
+        self._model_cls = model_cls
+        # The processor is tokeniser and feature extractor only: CPU-side, cheap, and
+        # needed to answer requests, so it is loaded once and kept.
         self.processor = processor_cls.from_pretrained(model_dir)
-        self.model = model_cls.from_pretrained(model_dir, device=self.device, ov_config=ov_config or {})
+        self.model: Any = None
+        self._lock = threading.RLock()
+        self._last_used = 0.0
         self._reported_ignored: set[str] = set()
+
+        if self.idle_unload_s:
+            logger.info("OpenVINO model loads on first request and unloads after %.0fs idle", self.idle_unload_s)
+            threading.Thread(target=self._idle_watch, name="ov-idle-unload", daemon=True).start()
+        else:
+            self.load()
+
+    def _load_model(self) -> Any:
+        return self._model_cls.from_pretrained(self.model_dir, device=self.device, ov_config=self.ov_config)
+
+    def load(self) -> None:
+        """Compile for the device if it is not already compiled."""
+        with self._lock:
+            if self.model is None:
+                started = time.monotonic()
+                self.model = self._load_model()
+                logger.info("OpenVINO model compiled for %s in %.1fs", self.device, time.monotonic() - started)
+            self._last_used = time.monotonic()
+
+    def unload(self) -> bool:
+        """Release the compiled model, and with it the device memory it holds."""
+        with self._lock:
+            if self.model is None:
+                return False
+            self.model = None
+            gc.collect()
+            logger.info("OpenVINO model unloaded; %s memory released", self.device)
+            return True
+
+    def _idle_watch(self) -> None:
+        interval = min(5.0, self.idle_unload_s)
+        while True:
+            time.sleep(interval)
+            with self._lock:
+                idle_for = time.monotonic() - self._last_used
+                if self.model is not None and idle_for >= self.idle_unload_s:
+                    self.unload()
 
     def _report_ignored(self, config: dict[str, Any]) -> None:
         ignored = sorted(set(config) - HONOURED_KEYS - PIPELINE_KEYS - self._reported_ignored)
@@ -175,7 +239,18 @@ class OpenVinoWhisperModel:
             params["repetition_penalty"] = float(config["repetition_penalty"])
 
         segments: list[RawSegment] = []
-        for span_start, span_end in _spans_from_clip_timestamps(config.get("clip_timestamps"), total_s):
+        with self._lock:  # also keeps the idle timer from unloading mid-request
+            self.load()
+            segments = self._decode_spans(samples, total_s, params, config.get("clip_timestamps"))
+            self._last_used = time.monotonic()
+
+        return segments, SimpleNamespace(duration=total_s)
+
+    def _decode_spans(
+        self, samples: np.ndarray, total_s: float, params: dict[str, Any], clip_timestamps: Any
+    ) -> list[RawSegment]:
+        segments: list[RawSegment] = []
+        for span_start, span_end in _spans_from_clip_timestamps(clip_timestamps, total_s):
             start_sample = max(0, min(len(samples), int(round(span_start * WHISPER_SAMPLING_RATE))))
             end_sample = max(start_sample, min(len(samples), int(round(span_end * WHISPER_SAMPLING_RATE))))
             for window_start in range(start_sample, end_sample, WINDOW_SAMPLES):
@@ -183,8 +258,15 @@ class OpenVinoWhisperModel:
                 if not len(window):
                     continue
                 segments.extend(self._decode_window(window, window_start / WHISPER_SAMPLING_RATE, params))
-
-        return segments, SimpleNamespace(duration=total_s)
+        return segments
 
     def describe(self) -> dict[str, Any]:
-        return {"backend": "openvino", "model": self.model_dir, "device": self.device}
+        with self._lock:
+            loaded = self.model is not None
+        return {
+            "backend": "openvino",
+            "model": self.model_dir,
+            "device": self.device,
+            "loaded": loaded,
+            "idle_unload_s": self.idle_unload_s,
+        }

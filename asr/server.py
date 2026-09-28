@@ -277,9 +277,11 @@ class TranscriptionService:
             self.model = OpenVinoWhisperModel(
                 self.inference.model_name_or_path,
                 device=args.ov_device,
+                idle_unload_s=args.ov_idle_unload,
             )
             logger.info(
-                "Model ready in %.1fs (backend=openvino, device=%s, precision=%s, task=%s)",
+                "Model %s in %.1fs (backend=openvino, device=%s, precision=%s, task=%s)",
+                "ready" if self.model.model is not None else "deferred to first request",
                 time.monotonic() - started,
                 self.model.device,
                 args.ov_precision,
@@ -312,7 +314,7 @@ class TranscriptionService:
     def describe(self) -> dict[str, Any]:
         config = self.inference.generation_config
         openvino = self.backend == "openvino"
-        return {
+        described = {
             "backend": self.backend,
             "model": self.inference.model_name_or_path,
             "device": self.model.device if openvino else self.inference.device,
@@ -324,6 +326,10 @@ class TranscriptionService:
             "smart_split": self.inference.smart_split_options.enabled,
             "queued": self.queue_depth,
         }
+        if openvino:
+            # loaded and idle_unload_s: whether device memory is held right now.
+            described.update(self.model.describe())
+        return described
 
     def transcribe(
         self, audio_path: str, overrides: dict[str, Any] | None = None
@@ -633,6 +639,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--ov_device",
         default=os.environ.get("OV_DEVICE", "GPU"),
         help="OpenVINO device for the openvino backend, e.g. GPU, GPU.1, CPU. Defaults to $OV_DEVICE, or GPU.",
+    )
+    model.add_argument(
+        "--ov_idle_unload",
+        type=float,
+        default=float(os.environ.get("OV_IDLE_UNLOAD_S", "0") or 0),
+        help="Seconds of idleness after which the openvino backend releases its device memory, "
+        "reloading on the next request. 0 (default) compiles at startup and holds it for the life "
+        "of the process. Set it when the GPU is shared, so an idle server is not squatting on VRAM. "
+        "Defaults to $OV_IDLE_UNLOAD_S.",
     )
     model.add_argument("--model_name_or_path", default="models", help="CTranslate2 model directory (default: models)")
     model.add_argument("--device", default="auto", help="cpu, cuda, auto (amd/rocm/hip alias to cuda)")

@@ -6,6 +6,8 @@ step is stubbed, leaving the span, window and token-budget arithmetic under test
 """
 
 import sys
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -81,6 +83,11 @@ class TranscribeAssemblyTest(unittest.TestCase):
         model.model_dir = "models/ov-int8"
         model.device = "CPU"
         model.processor = FakeProcessor()
+        model.idle_unload_s = 0.0
+        model.model = object()  # stands in for a compiled model
+        model._lock = threading.RLock()
+        model._last_used = 0.0
+        model._load_model = lambda: object()
         model._reported_ignored = set()
         self.windows: list[tuple[float, int]] = []
 
@@ -144,6 +151,68 @@ class TranscribeAssemblyTest(unittest.TestCase):
         # A second call with the same key logs nothing, so the log is not per-request noise.
         with self.assertNoLogs("ov_backend", level="INFO"):
             model.transcribe(np.zeros(WHISPER_SAMPLING_RATE, dtype=np.float32), condition_on_previous_text=True)
+
+
+class LoadPolicyTest(unittest.TestCase):
+    """Lazy compile and idle release, with the OpenVINO call stubbed out."""
+
+    def _model(self, idle_unload_s):
+        model = object.__new__(OpenVinoWhisperModel)
+        model.model_dir = "models/ov-int8"
+        model.device = "GPU"
+        model.idle_unload_s = idle_unload_s
+        model.model = None
+        model._lock = threading.RLock()
+        model._last_used = 0.0
+        model._reported_ignored = set()
+        self.loads = 0
+
+        def fake_load():
+            self.loads += 1
+            return object()
+
+        model._load_model = fake_load
+        return model
+
+    def test_load_is_idempotent(self):
+        model = self._model(0.0)
+        model.load()
+        model.load()
+        self.assertEqual(self.loads, 1)
+        self.assertIsNotNone(model.model)
+
+    def test_unload_releases_and_reports_whether_it_did(self):
+        model = self._model(60.0)
+        model.load()
+        self.assertTrue(model.unload())
+        self.assertIsNone(model.model)
+        self.assertFalse(model.unload(), "unloading twice should report no-op")
+
+    def test_reload_after_unload_compiles_again(self):
+        model = self._model(60.0)
+        model.load()
+        model.unload()
+        model.load()
+        self.assertEqual(self.loads, 2)
+
+    def test_describe_reports_whether_memory_is_held(self):
+        model = self._model(30.0)
+        self.assertEqual(model.describe()["loaded"], False)
+        model.load()
+        described = model.describe()
+        self.assertEqual(described["loaded"], True)
+        self.assertEqual(described["idle_unload_s"], 30.0)
+        self.assertEqual(described["device"], "GPU")
+
+    def test_idle_watch_unloads_only_after_the_timeout(self):
+        model = self._model(0.2)
+        model.load()
+        threading.Thread(target=model._idle_watch, daemon=True).start()
+        self.assertIsNotNone(model.model, "must not unload while freshly used")
+        deadline = time.monotonic() + 5
+        while model.model is not None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertIsNone(model.model, "idle timer should have released the model")
 
 
 if __name__ == "__main__":
