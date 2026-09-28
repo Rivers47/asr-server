@@ -2,6 +2,7 @@
 #
 #   podman build -t asmr-asr-ov --format oci -f containerfile.openvino .
 #   podman run --rm -v ./models:/srv/models:Z asmr-asr-ov python fetch_models.py --only vad
+#   podman run --rm -v ./models:/srv/models:Z asmr-asr-ov python export_openvino.py
 #   podman run --rm --device /dev/dri --group-add keep-groups \
 #       -v ./models:/srv/models:Z -p 127.0.0.1:8000:8000 asmr-asr-ov
 #
@@ -25,7 +26,9 @@
 #   models/ov-fp32/                  OpenVINO IR, fp32 weights (6.2 GB)
 #   models/ov-*/*/model_cache/       compiled kernels, written at runtime (~1.5 GB)
 #
-# Build the IR outside this image; export peaks around 8.5 GB RSS.
+# export_openvino.py builds the IR, in this image or anywhere else with the openvino
+# extra installed. It needs ~3 GB of download, ~10 GB of disk and around 8.5 GB of
+# RSS, so give the build room or copy an IR built elsewhere into the volume.
 
 # Fedora, where the CPU image uses python:3.14-slim: Debian trixie carries no
 # intel-opencl-icd (bookworm and forky do, trixie does not) and Debian stable has
@@ -62,7 +65,7 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --extra openvino --python /usr/bin/python3
 
 COPY asr/ asr/
-COPY serve.py fetch_models.py generation_config.json5 ov_backend.py ./
+COPY serve.py fetch_models.py generation_config.json5 ov_backend.py export_openvino.py ./
 
 # ov_backend.py sits outside the asr package because it imports transformers, which
 # asr/ is kept free of; asr/server.py imports it lazily when --backend is openvino.

@@ -251,9 +251,31 @@ backend reads only inside `models/ov-*`, and startup checks for the IR's `.xml`
 pair rather than `model.bin`. Both containers can run against the same mount at
 once, sharing `whisper_vad.onnx`, which is CPU-side either way.
 
-`--model_name_or_path` overrides that path directly. Build the IR outside the
-image; `bench/README.md` covers the export, including the Python 3.14 issue that
-breaks `optimum-cli`.
+`--model_name_or_path` overrides that path directly.
+
+### Building the IR
+
+No OpenVINO export of this model is published, so `fetch_models.py` has nothing to
+fetch for this backend — only the VAD. `export_openvino.py` converts the
+transformers checkpoint instead, and runs in the OpenVINO image, which already has
+the stack:
+
+```bash
+podman run --rm -v ./models:/srv/models:Z asmr-asr-ov python fetch_models.py --only vad
+podman run --rm -v ./models:/srv/models:Z asmr-asr-ov python export_openvino.py
+```
+
+`--precision` takes `int8` (default), `fp32` or `both`. The fp32 IR is written even
+for an int8-only run, because the compression pass reads it; that copy goes to a
+scratch directory under `--models-dir` and is removed afterwards.
+
+It is not cheap: ~3 GB of checkpoint download, ~10 GB of disk, and **8.5 GB of peak
+RSS** while tracing, for 97 s of export plus about 110 s of compression. A machine
+without that headroom should convert elsewhere and copy `models/ov-int8` over — the
+IR is a build artifact, and the server never imports optimum.
+
+`bench/README.md` has the failure modes behind all of this, including the Python 3.14
+`functools.partial` change that breaks `optimum-cli` and the version caps involved.
 
 ### Sharing the GPU
 

@@ -22,7 +22,7 @@ lint:
     - ruff format --check .
     # --no-site-packages keeps the result independent of which numpy stubs the
     # image happens to resolve.
-    - mypy --config-file pyproject.toml --no-site-packages asr serve.py fetch_models.py ov_backend.py tests
+    - mypy --config-file pyproject.toml --no-site-packages asr serve.py fetch_models.py ov_backend.py export_openvino.py tests
 
 test:
   stage: check
@@ -101,6 +101,7 @@ container_openvino:
     - |
       ctr=$(buildah from "$IMAGE:$CI_COMMIT_SHORT_SHA")
       buildah run "$ctr" -- python serve.py --help
+      buildah run "$ctr" -- python export_openvino.py --help
 
       # The GPU drivers, which are the reason this image is not built on the base
       # the CPU image uses. No GPU is exposed to the build, so their presence is
