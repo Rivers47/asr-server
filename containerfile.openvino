@@ -5,9 +5,12 @@
 #   podman run --rm --device /dev/dri --group-add keep-groups \
 #       -v ./models:/srv/models:Z -p 127.0.0.1:8000:8000 asmr-asr-ov
 #
-# --device /dev/dri exposes the GPU; --group-add keep-groups carries the host's
-# render group membership into a rootless container. Without both, OpenVINO reports
-# no GPU device and runs on the CPU at a fraction of the speed.
+# --device /dev/dri exposes the GPU. OpenVINO's compute path opens only the render
+# node, /dev/dri/renderD*, never card0, so --device /dev/dri/renderD128 is enough.
+# --group-add keep-groups is needed only where that node is 0660 root:render: it
+# carries the host user's render group into a rootless container, which otherwise
+# drops supplementary groups. Where the node is 0666, it is unnecessary. Without
+# access OpenVINO reports no GPU device and runs on the CPU.
 #
 # The volume is mounted read-write, unlike the CPU image's ro: on a GPU device
 # optimum-intel points OpenVINO's CACHE_DIR at the IR directory, and the compiled

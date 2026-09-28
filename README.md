@@ -204,9 +204,21 @@ machine:
 rsync -a --exclude model_cache models/ov-int8/ arcbox:/srv/models/ov-int8/
 ```
 
-`--device /dev/dri` and `--group-add keep-groups` are both required. Without them
-OpenVINO finds no GPU, runs on the CPU, and reports nothing unusual. `clinfo` is in
-the image to check from inside it, and `GET /health` reports the device in use.
+`--device /dev/dri` is required. Whether `--group-add keep-groups` is also needed
+depends on permissions: OpenVINO's compute path opens only the *render* node,
+`/dev/dri/renderD*`, never the primary node `card0` — so the `video` group is
+irrelevant here. Where the render node is mode `0666` any user can open it and no
+group flag is needed; where it is `0660 root:render` the host user must be in
+`render`, and rootless podman needs `--group-add keep-groups` to carry that
+membership in, since it drops supplementary groups otherwise. Check with
+`ls -l /dev/dri`.
+
+Since `card0` goes unused, the device can be narrowed to
+`--device /dev/dri/renderD128`.
+
+Without access OpenVINO finds no GPU, runs on the CPU, and reports nothing unusual.
+`clinfo` is in the image to check from inside it, and `GET /health` reporting
+`"device": "CPU"` is the tell.
 
 This image is built on **Fedora**, not the `python:3.14-slim` base the CPU image
 uses. Debian trixie carries no `intel-opencl-icd` — bookworm and forky do, trixie
