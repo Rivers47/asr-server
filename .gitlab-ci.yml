@@ -40,7 +40,7 @@ test:
 
 # buildah builds unprivileged, which a rootless podman runner requires.
 # docs/ci.md has a dind variant for privileged docker runners.
-container:
+.buildah:
   stage: build
   image: quay.io/buildah/stable
   variables:
@@ -50,29 +50,71 @@ container:
     # containers are usually not allowed to create.
     BUILDAH_ISOLATION: chroot
     BUILDAH_FORMAT: oci
+
+# Referenced as the last script step of each build job. Needs IMAGE and
+# REGISTRY_TARGET. CI_REGISTRY only exists when this GitLab has its Container
+# Registry enabled; without it the image is built and smoke-tested, just not pushed.
+.push:
   script:
-    - buildah bud -f containerfile -t "asr-server:$CI_COMMIT_SHORT_SHA" .
-
-    # Smoke test. The image has no model weights, so it cannot transcribe here;
-    # what this proves is that every dependency resolved and the package imports
-    # -- which is the failure mode a build actually catches.
-    - |
-      ctr=$(buildah from "asr-server:$CI_COMMIT_SHORT_SHA")
-      buildah run "$ctr" -- python serve.py --help
-      buildah run "$ctr" -- python fetch_models.py --help
-      buildah run "$ctr" -- python -c "import asr.server; print('imports ok')"
-      buildah rm "$ctr"
-
-    # CI_REGISTRY only exists when the GitLab Container Registry is enabled.
-    # Without it the image is built and smoke-tested, just not pushed.
     - |
       if [ -z "$CI_REGISTRY" ]; then
         echo "no registry configured -- built and smoke-tested only"
         exit 0
       fi
       buildah login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
-      push() { buildah push "asr-server:$CI_COMMIT_SHORT_SHA" "docker://$CI_REGISTRY_IMAGE:$1"; }
+      push() { buildah push "$IMAGE:$CI_COMMIT_SHORT_SHA" "docker://$REGISTRY_TARGET:$1"; }
       push "$CI_COMMIT_SHORT_SHA"
       [ "$CI_COMMIT_BRANCH" = "$CI_DEFAULT_BRANCH" ] && push latest
       [ -n "$CI_COMMIT_TAG" ] && push "$CI_COMMIT_TAG"
       true
+
+container:
+  extends: .buildah
+  variables:
+    IMAGE: asr-server
+    REGISTRY_TARGET: $CI_REGISTRY_IMAGE
+  script:
+    - buildah bud -f containerfile -t "$IMAGE:$CI_COMMIT_SHORT_SHA" .
+
+    # Smoke test. The image has no model weights, so it cannot transcribe here;
+    # what this proves is that every dependency resolved and the package imports
+    # -- which is the failure mode a build actually catches.
+    - |
+      ctr=$(buildah from "$IMAGE:$CI_COMMIT_SHORT_SHA")
+      buildah run "$ctr" -- python serve.py --help
+      buildah run "$ctr" -- python fetch_models.py --help
+      buildah run "$ctr" -- python -c "import asr.server; print('imports ok')"
+      buildah rm "$ctr"
+
+    - !reference [.push, script]
+
+# The slower of the two builds: the openvino extra adds torch, transformers and
+# nncf's scipy/scikit-learn, and vfs copies every layer.
+container_openvino:
+  extends: .buildah
+  variables:
+    IMAGE: asr-server-openvino
+    REGISTRY_TARGET: $CI_REGISTRY_IMAGE/openvino
+  script:
+    - buildah bud -f containerfile.openvino -t "$IMAGE:$CI_COMMIT_SHORT_SHA" .
+
+    - |
+      ctr=$(buildah from "$IMAGE:$CI_COMMIT_SHORT_SHA")
+      buildah run "$ctr" -- python serve.py --help
+
+      # The GPU drivers, which are the reason this image is not built on the base
+      # the CPU image uses. No GPU is exposed to the build, so their presence is
+      # all that can be checked here.
+      buildah run "$ctr" -- rpm -q intel-compute-runtime oneapi-level-zero
+
+      # ov_backend imports transformers defensively, so a broken stack leaves the
+      # module importable with its classes set to None -- which is how a torchvision
+      # built against the wrong torch would slip through. Assert, do not just import.
+      buildah run "$ctr" -- python -c "import ov_backend; assert ov_backend.OVModelForSpeechSeq2Seq is not None, ov_backend._OPTIMUM_INTEL_IMPORT_ERROR; print('openvino stack ok')"
+      buildah run "$ctr" -- python -c "import openvino; print('devices:', openvino.Core().available_devices)"
+
+      # ASR_BACKEND, OV_PRECISION and OV_DEVICE reach the parser as defaults.
+      buildah run "$ctr" -- python -c "from asr.server import resolve_args; a = resolve_args([]); assert (a.backend, a.model_name_or_path, a.ov_device) == ('openvino', 'models/ov-int8', 'GPU'), a; print('backend defaults ok')"
+      buildah rm "$ctr"
+
+    - !reference [.push, script]
