@@ -38,29 +38,24 @@ import numpy as np
 SAMPLE_RATE = 16_000
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-MAX_NEW_TOKENS = 440
 # faster-whisper truncates hotwords to max_length // 2 - 1 tokens; the transformers
 # backends are capped the same way so every backend sees the same hotword content.
 HOTWORDS_TOKEN_CAP = 223
-# generate() prepends start-of-transcript, language and task tokens to the prompt.
-SPECIAL_TOKEN_SLOTS = 4
 
 
-def prompt_from_hotwords(processor, hotwords: str, max_target_positions: int):
-    """Hotwords as Whisper prompt tokens, with the max_new_tokens they leave room for.
+def prompt_from_hotwords(processor, hotwords: str):
+    """Hotwords as Whisper prompt tokens, capped the way faster-whisper caps them.
 
-    faster-whisper takes hotwords as a string and manages the token budget itself.
-    transformers counts prompt + special tokens + max_new_tokens against
-    max_target_positions and raises when they exceed it, so the budget is computed
-    here rather than passing a constant.
+    Nothing is passed for the generated length: the model's own max_length of 448
+    caps prompt, special tokens and generated text together, which is the constraint
+    that applies, and setting both makes transformers warn on every call.
     """
     if not hotwords:
-        return None, MAX_NEW_TOKENS
+        return None
     prompt_ids = processor.get_prompt_ids(hotwords, return_tensors="pt")
     if len(prompt_ids) - 1 > HOTWORDS_TOKEN_CAP:  # index 0 is <|startofprev|>
         prompt_ids = prompt_ids[: HOTWORDS_TOKEN_CAP + 1]
-    budget = max_target_positions - len(prompt_ids) - SPECIAL_TOKEN_SLOTS
-    return prompt_ids, max(1, min(MAX_NEW_TOKENS, budget))
+    return prompt_ids
 
 
 # backend -> (import probe, human description, install hint)
@@ -230,9 +225,7 @@ def run_torch(chunks: list[np.ndarray], device: str, args) -> tuple[float, list[
         getattr(torch, device).synchronize()
     load_s = time.perf_counter() - started
 
-    prompt_ids, max_new_tokens = prompt_from_hotwords(
-        processor, args.hotwords, getattr(model.config, "max_target_positions", 448)
-    )
+    prompt_ids = prompt_from_hotwords(processor, args.hotwords)
 
     def decode(audio: np.ndarray) -> str:
         features = processor(audio, sampling_rate=SAMPLE_RATE, return_tensors="pt").input_features
@@ -242,7 +235,6 @@ def run_torch(chunks: list[np.ndarray], device: str, args) -> tuple[float, list[
                 num_beams=args.beam_size,
                 language=args.language,
                 task="transcribe",
-                max_new_tokens=max_new_tokens,
                 prompt_ids=prompt_ids,
             )
         if device != "cpu":
@@ -266,9 +258,7 @@ def run_openvino(chunks: list[np.ndarray], device: str, args) -> tuple[float, li
     )
     load_s = time.perf_counter() - started
 
-    prompt_ids, max_new_tokens = prompt_from_hotwords(
-        processor, args.hotwords, getattr(model.config, "max_target_positions", 448)
-    )
+    prompt_ids = prompt_from_hotwords(processor, args.hotwords)
 
     def decode(audio: np.ndarray) -> str:
         features = processor(audio, sampling_rate=SAMPLE_RATE, return_tensors="pt").input_features
@@ -277,7 +267,6 @@ def run_openvino(chunks: list[np.ndarray], device: str, args) -> tuple[float, li
             num_beams=args.beam_size,
             language=args.language,
             task="transcribe",
-            max_new_tokens=max_new_tokens,
             prompt_ids=prompt_ids,
         )
         return processor.batch_decode(tokens, skip_special_tokens=True)[0].strip()

@@ -262,11 +262,11 @@ The decoder differs in three ways:
 
 - **Hotwords become `prompt_ids`.** faster-whisper takes a string and truncates it
   at 223 tokens. transformers has no `hotwords` parameter; the same slot is reached
-  through `WhisperProcessor.get_prompt_ids`, and it counts prompt + special tokens
-  + `max_new_tokens` against the model's 448 positions and raises when they exceed
-  it. The backend computes that budget per request and keeps the 223-token cap, so
-  a hotword list behaves the same on both backends. Longer lists are truncated,
-  silently, as they always were.
+  through `WhisperProcessor.get_prompt_ids`, kept to the same 223-token cap so a
+  hotword list behaves identically on both backends, and longer lists are truncated
+  silently as they always were. No generated-length limit is passed with it: the
+  model's `max_length` of 448 already bounds prompt, special tokens and output
+  together, and setting both makes transformers warn on every chunk.
 - **Decoding settings that have no OpenVINO equivalent are ignored**, and logged
   once each at startup rather than per request. `task`, `language`, `beam_size`,
   `hotwords`, `repetition_penalty` and `clip_timestamps` are honoured.

@@ -54,13 +54,14 @@ python bench/bench_backends.py four_short.opus \
 mechanism, reachable because optimum-intel dispatches Whisper to
 `_OVModelForWhisper(OVModelForSpeechSeq2Seq, WhisperForConditionalGeneration)`.
 
-Two differences the harness absorbs, and that a server port would have to as well:
+Two details the harness handles, and that a server port has to as well:
 
-- transformers counts prompt + special tokens + `max_new_tokens` against the model's
-  448 `max_target_positions` and **raises** rather than truncating, so
-  `max_new_tokens` is computed per run instead of fixed.
 - the prompt is capped at the same 223 tokens faster-whisper uses, so every backend
   sees identical hotword content.
+- no generated-length limit is passed alongside it. The model's `max_length` of 448
+  bounds prompt + special tokens + output together, which is the real constraint;
+  passing `max_new_tokens` as well makes transformers warn on every call, and gets
+  the arithmetic wrong for a long prompt.
 
 Per-chunk `generate()` calls re-assert the prompt at the head of every chunk, which
 is the behaviour the server's smart-split path relies on. A whole-file call would

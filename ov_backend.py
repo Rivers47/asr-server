@@ -40,12 +40,8 @@ WHISPER_SAMPLING_RATE = 16_000
 # Whisper's encoder consumes exactly 30 s; the exported encoder IR is fixed at
 # [?, 128, 3000] frames, so longer input is decoded one window at a time.
 WINDOW_SAMPLES = 30 * WHISPER_SAMPLING_RATE
-MAX_NEW_TOKENS = 440
 # faster-whisper truncates hotwords to max_length // 2 - 1 tokens.
 HOTWORDS_TOKEN_CAP = 223
-# generate() prepends start-of-transcript, language and task tokens to the prompt.
-SPECIAL_TOKEN_SLOTS = 4
-DEFAULT_MAX_TARGET_POSITIONS = 448
 
 # Keys this backend acts on. Everything else in the generation config belongs to
 # CTranslate2 or to the pipeline itself and is reported once, then ignored.
@@ -73,22 +69,23 @@ class RawSegment:
     text: str
 
 
-def prompt_from_hotwords(processor, hotwords: str, max_target_positions: int) -> tuple[Any, int]:
-    """Hotwords as Whisper prompt tokens, with the max_new_tokens they leave room for.
+def prompt_from_hotwords(processor, hotwords: str) -> Any:
+    """Hotwords as Whisper prompt tokens, capped the way faster-whisper caps them.
 
-    faster-whisper takes hotwords as a string, encodes them into the decoder prompt
-    and truncates at 223 tokens. transformers exposes the same slot as ``prompt_ids``
-    but counts prompt + special tokens + ``max_new_tokens`` against the model's 448
-    ``max_target_positions`` and raises when they exceed it, so the budget is
-    computed here. The 223-token cap is kept so both backends see the same content.
+    faster-whisper takes hotwords as a string and truncates at 223 tokens; the
+    transformers equivalent is ``prompt_ids``, kept to the same cap so both backends
+    see the same content.
+
+    No ``max_new_tokens`` goes with it. The model's own ``max_length`` of 448 caps
+    prompt, special tokens and generated text together, which is the constraint that
+    actually applies, and setting both makes transformers warn on every call.
     """
     if not hotwords:
-        return None, MAX_NEW_TOKENS
+        return None
     prompt_ids = processor.get_prompt_ids(hotwords, return_tensors="pt")
     if len(prompt_ids) - 1 > HOTWORDS_TOKEN_CAP:  # index 0 is <|startofprev|>
         prompt_ids = prompt_ids[: HOTWORDS_TOKEN_CAP + 1]
-    budget = max_target_positions - len(prompt_ids) - SPECIAL_TOKEN_SLOTS
-    return prompt_ids, max(1, min(MAX_NEW_TOKENS, budget))
+    return prompt_ids
 
 
 def _decode_path(audio_path: str) -> np.ndarray:
@@ -128,9 +125,6 @@ class OpenVinoWhisperModel:
         self.device = (device or "GPU").strip().upper()
         self.processor = processor_cls.from_pretrained(model_dir)
         self.model = model_cls.from_pretrained(model_dir, device=self.device, ov_config=ov_config or {})
-        self.max_target_positions = int(
-            getattr(self.model.config, "max_target_positions", DEFAULT_MAX_TARGET_POSITIONS)
-        )
         self._reported_ignored: set[str] = set()
 
     def _report_ignored(self, config: dict[str, Any]) -> None:
@@ -171,15 +165,11 @@ class OpenVinoWhisperModel:
         total_s = len(samples) / WHISPER_SAMPLING_RATE
         self._report_ignored(config)
 
-        prompt_ids, max_new_tokens = prompt_from_hotwords(
-            self.processor, config.get("hotwords") or "", self.max_target_positions
-        )
         params: dict[str, Any] = {
             "language": config.get("language") or "ja",
             "task": config.get("task") or "transcribe",
             "num_beams": max(1, int(config.get("beam_size") or 1)),
-            "max_new_tokens": max_new_tokens,
-            "prompt_ids": prompt_ids,
+            "prompt_ids": prompt_from_hotwords(self.processor, config.get("hotwords") or ""),
         }
         if config.get("repetition_penalty"):
             params["repetition_penalty"] = float(config["repetition_penalty"])

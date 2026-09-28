@@ -16,8 +16,6 @@ sys.path.insert(0, str(ROOT))
 
 from ov_backend import (  # noqa: E402
     HOTWORDS_TOKEN_CAP,
-    MAX_NEW_TOKENS,
-    SPECIAL_TOKEN_SLOTS,
     WHISPER_SAMPLING_RATE,
     WINDOW_SAMPLES,
     OpenVinoWhisperModel,
@@ -60,28 +58,19 @@ class SpanTest(unittest.TestCase):
 
 
 class HotwordsPromptTest(unittest.TestCase):
-    def test_no_hotwords_leaves_the_default_budget(self):
-        prompt_ids, max_new_tokens = prompt_from_hotwords(FakeProcessor(), "", 448)
-        self.assertIsNone(prompt_ids)
-        self.assertEqual(max_new_tokens, MAX_NEW_TOKENS)
+    def test_no_hotwords_means_no_prompt(self):
+        self.assertIsNone(prompt_from_hotwords(FakeProcessor(), ""))
 
-    def test_budget_accounts_for_prompt_and_special_tokens(self):
-        """transformers raises when prompt + specials + max_new_tokens exceeds 448."""
-        hotwords = "x" * 100  # 100 ids plus <|startofprev|>
-        prompt_ids, max_new_tokens = prompt_from_hotwords(FakeProcessor(), hotwords, 448)
-        self.assertEqual(len(prompt_ids), 101)
-        self.assertEqual(max_new_tokens, 448 - 101 - SPECIAL_TOKEN_SLOTS)
-        self.assertLessEqual(len(prompt_ids) + SPECIAL_TOKEN_SLOTS + max_new_tokens, 448)
-
-    def test_short_hotwords_do_not_raise_the_default(self):
-        _, max_new_tokens = prompt_from_hotwords(FakeProcessor(), "xy", 448)
-        self.assertEqual(max_new_tokens, MAX_NEW_TOKENS)
+    def test_hotwords_become_prompt_tokens(self):
+        prompt_ids = prompt_from_hotwords(FakeProcessor(), "x" * 100)
+        self.assertEqual(len(prompt_ids), 101)  # 100 ids plus <|startofprev|>
+        self.assertEqual(prompt_ids[0], FakeProcessor.START_OF_PREV)
 
     def test_long_hotwords_are_capped_like_faster_whisper(self):
-        prompt_ids, max_new_tokens = prompt_from_hotwords(FakeProcessor(), "x" * 400, 448)
+        """Over the cap the prompt is truncated, silently, exactly as faster-whisper does."""
+        prompt_ids = prompt_from_hotwords(FakeProcessor(), "x" * 400)
         self.assertEqual(len(prompt_ids), HOTWORDS_TOKEN_CAP + 1)
-        self.assertGreaterEqual(max_new_tokens, 1)
-        self.assertLessEqual(len(prompt_ids) + SPECIAL_TOKEN_SLOTS + max_new_tokens, 448)
+        self.assertEqual(prompt_ids[0], FakeProcessor.START_OF_PREV)
 
 
 class TranscribeAssemblyTest(unittest.TestCase):
@@ -92,7 +81,6 @@ class TranscribeAssemblyTest(unittest.TestCase):
         model.model_dir = "models/ov-int8"
         model.device = "CPU"
         model.processor = FakeProcessor()
-        model.max_target_positions = 448
         model._reported_ignored = set()
         self.windows: list[tuple[float, int]] = []
 
@@ -141,7 +129,12 @@ class TranscribeAssemblyTest(unittest.TestCase):
         model.transcribe(np.zeros(WHISPER_SAMPLING_RATE * 5, dtype=np.float32), hotwords="ちゅぷっ", beam_size=5)
         self.assertEqual(self.params["num_beams"], 5)
         self.assertIsNotNone(self.params["prompt_ids"])
-        self.assertLess(self.params["max_new_tokens"], MAX_NEW_TOKENS)
+
+    def test_no_generated_length_is_passed(self):
+        """max_length (448) already bounds prompt + specials + output; passing both warns."""
+        model = self._model()
+        model.transcribe(np.zeros(WHISPER_SAMPLING_RATE * 5, dtype=np.float32), hotwords="ちゅぷっ")
+        self.assertNotIn("max_new_tokens", self.params)
 
     def test_ignored_keys_are_reported_once(self):
         model = self._model()
