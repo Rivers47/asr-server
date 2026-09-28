@@ -193,6 +193,14 @@ podman run --rm --device /dev/dri --group-add keep-groups \
 OpenVINO finds no GPU, runs on the CPU, and reports nothing unusual. `clinfo` is in
 the image to check from inside it, and `GET /health` reports the device in use.
 
+This image is built on **Fedora**, not the `python:3.14-slim` base the CPU image
+uses. Debian trixie carries no `intel-opencl-icd` — bookworm and forky do, trixie
+does not — and Debian stable has never packaged a Level Zero GPU driver, so the
+Intel compute stack cannot be installed there at all. Fedora 44 ships
+`intel-compute-runtime` (the NEO driver, providing both backends) and
+`oneapi-level-zero` (its loader), and its `python3` is already 3.14, so the image
+needs no second interpreter.
+
 Three flags select the stack, each defaulting to an environment variable so the
 image can be configured without changing its command:
 

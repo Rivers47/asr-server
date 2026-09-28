@@ -18,19 +18,22 @@
 #
 # Build the IR outside this image; export peaks around 8.5 GB RSS.
 
-# The suite is pinned because the Intel driver package names below are trixie's.
-FROM docker.io/library/python:3.14-slim-trixie
+# Fedora, where the CPU image uses python:3.14-slim: Debian trixie carries no
+# intel-opencl-icd (bookworm and forky do, trixie does not) and Debian stable has
+# never packaged a Level Zero GPU driver, so the Intel compute stack is not
+# installable there. Fedora 44 ships both, and its python3 is 3.14 — the floor
+# pyproject.toml sets — so the image needs no second interpreter.
+FROM registry.fedoraproject.org/fedora:44
 
 COPY --from=ghcr.io/astral-sh/uv:0.11 /uv /usr/local/bin/uv
 
-# libgomp is the OpenMP runtime ONNX Runtime links against. The rest is the GPU
-# stack OpenVINO dispatches through: intel-opencl-icd is the OpenCL driver, libze1
-# the Level Zero loader, libze-intel-gpu1 the Level Zero driver behind it. clinfo
-# reports which of them the container can actually see.
-RUN apt-get update \
- && apt-get install -y --no-install-recommends \
-        libgomp1 intel-opencl-icd libze1 libze-intel-gpu1 clinfo \
- && rm -rf /var/lib/apt/lists/*
+# intel-compute-runtime is the NEO driver, providing both the OpenCL and Level Zero
+# GPU backends OpenVINO dispatches through; oneapi-level-zero is the loader in front
+# of it. libgomp is the OpenMP runtime ONNX Runtime links against. clinfo reports
+# which devices the container can actually see.
+RUN dnf install -y --setopt=install_weak_deps=False \
+        python3 libgomp intel-compute-runtime oneapi-level-zero clinfo \
+ && dnf clean all
 
 WORKDIR /srv
 
@@ -44,8 +47,10 @@ ENV UV_PROJECT_ENVIRONMENT=/srv/.venv \
 # Dependency layer first: rebuilt only when the lock changes, not on every edit.
 # The openvino extra carries the OpenVINO stack, and pyproject.toml routes torch and
 # torchvision to PyTorch's CPU index, so nothing here pulls a CUDA build.
+# --python names the system interpreter, which uv would otherwise pass over in
+# favour of downloading a managed build of the same version.
 COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-dev --extra openvino
+RUN uv sync --frozen --no-dev --extra openvino --python /usr/bin/python3
 
 COPY asr/ asr/
 COPY serve.py fetch_models.py generation_config.json5 ov_backend.py ./
