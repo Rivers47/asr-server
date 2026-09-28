@@ -473,12 +473,17 @@ class Inference:
         # real core count instead.
         self.cpu_threads = max(0, args.cpu_threads or 0) or max(1, available_cpus() // 2)
         self.vad_force_cpu = bool(args.vad_force_cpu)
+        self.backend = (getattr(args, "backend", "faster-whisper") or "faster-whisper").strip().lower()
         self.device = (args.device or "auto").strip().lower()
         if self.device in {"amd", "rocm", "hip"}:
             # CTranslate2 HIP backend still uses the public device name "cuda".
             self.device = "cuda"
-        # Auto-select compute type if 'auto' or 'default' is specified
-        if args.compute_type in ["auto", "default"]:
+        # device and compute_type belong to CTranslate2. The OpenVINO backend takes
+        # its device from --ov_device and its precision from the IR it loads, so
+        # probing here would log a device and compute type that nothing reads.
+        if self.backend == "openvino":
+            self.compute_type = None
+        elif args.compute_type in ["auto", "default"]:
             self.compute_type = select_best_compute_type(self.device)
         else:
             self.compute_type = args.compute_type

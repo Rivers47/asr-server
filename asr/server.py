@@ -260,7 +260,7 @@ class TranscriptionService:
 
     def __init__(self, args: argparse.Namespace, max_queue: int = 8):
         self.inference = Inference(args)
-        self.backend = getattr(args, "backend", "faster-whisper")
+        self.backend = self.inference.backend
         _require_models(self.inference, self.backend)
         self.max_queue = max_queue
         self._lock = threading.Lock()
