@@ -213,7 +213,7 @@ class MissingModelError(RuntimeError):
     """Raised at startup when a required model file is absent."""
 
 
-def _require_models(inference) -> None:
+def _require_models(inference, backend: str = "faster-whisper") -> None:
     """Refuse to start without the models, rather than degrading silently.
 
     A missing VAD is the dangerous one: ``Inference`` only logs a warning, the
@@ -228,9 +228,23 @@ def _require_models(inference) -> None:
             "Run: python fetch_models.py --only vad"
         )
 
+    asr_path = inference.model_name_or_path
+
+    if backend == "openvino":
+        missing = [
+            name
+            for name in ("openvino_encoder_model.xml", "openvino_decoder_model.xml")
+            if not os.path.exists(os.path.join(asr_path, name))
+        ]
+        if missing:
+            raise MissingModelError(
+                f"No OpenVINO IR in {os.path.abspath(asr_path)} (missing {', '.join(missing)}).\n"
+                "Export it first; see bench/README.md."
+            )
+        return
+
     # model_name_or_path may be a HuggingFace repo id, which faster-whisper
     # downloads itself -- only check it when it names a local directory.
-    asr_path = inference.model_name_or_path
     if os.path.isdir(asr_path) and not os.path.exists(os.path.join(asr_path, "model.bin")):
         raise MissingModelError(f"No model.bin in {os.path.abspath(asr_path)}.\nRun: python fetch_models.py --only asr")
 
@@ -246,7 +260,8 @@ class TranscriptionService:
 
     def __init__(self, args: argparse.Namespace, max_queue: int = 8):
         self.inference = Inference(args)
-        _require_models(self.inference)
+        self.backend = getattr(args, "backend", "faster-whisper")
+        _require_models(self.inference, self.backend)
         self.max_queue = max_queue
         self._lock = threading.Lock()
         self._waiting = 0
@@ -254,23 +269,40 @@ class TranscriptionService:
 
         logger.info("Loading Whisper model from %s", self.inference.model_name_or_path)
         started = time.monotonic()
-        whisper_model_cls, _batched_cls = _require_faster_whisper()
-        self.model = whisper_model_cls(
-            self.inference.model_name_or_path,
-            device=self.inference.device,
-            compute_type=self.inference.compute_type,
-            cpu_threads=self.inference.cpu_threads,
-            # Transcriptions are serialised behind a lock, so a second worker
-            # would only duplicate the model in memory.
-            num_workers=1,
-        )
-        logger.info(
-            "Model ready in %.1fs (device=%s, compute_type=%s, task=%s)",
-            time.monotonic() - started,
-            self.inference.device,
-            self.inference.compute_type,
-            self.inference.generation_config.get("task"),
-        )
+        if self.backend == "openvino":
+            # Imported here, not at module scope: it pulls transformers, which only
+            # the OpenVINO image installs.
+            from ov_backend import OpenVinoWhisperModel
+
+            self.model = OpenVinoWhisperModel(
+                self.inference.model_name_or_path,
+                device=args.ov_device,
+            )
+            logger.info(
+                "Model ready in %.1fs (backend=openvino, device=%s, precision=%s, task=%s)",
+                time.monotonic() - started,
+                self.model.device,
+                args.ov_precision,
+                self.inference.generation_config.get("task"),
+            )
+        else:
+            whisper_model_cls, _batched_cls = _require_faster_whisper()
+            self.model = whisper_model_cls(
+                self.inference.model_name_or_path,
+                device=self.inference.device,
+                compute_type=self.inference.compute_type,
+                cpu_threads=self.inference.cpu_threads,
+                # Transcriptions are serialised behind a lock, so a second worker
+                # would only duplicate the model in memory.
+                num_workers=1,
+            )
+            logger.info(
+                "Model ready in %.1fs (backend=faster-whisper, device=%s, compute_type=%s, task=%s)",
+                time.monotonic() - started,
+                self.inference.device,
+                self.inference.compute_type,
+                self.inference.generation_config.get("task"),
+            )
 
     @property
     def queue_depth(self) -> int:
@@ -279,10 +311,12 @@ class TranscriptionService:
 
     def describe(self) -> dict[str, Any]:
         config = self.inference.generation_config
+        openvino = self.backend == "openvino"
         return {
+            "backend": self.backend,
             "model": self.inference.model_name_or_path,
-            "device": self.inference.device,
-            "compute_type": self.inference.compute_type,
+            "device": self.model.device if openvino else self.inference.device,
+            "compute_type": None if openvino else self.inference.compute_type,
             "cpu_threads": self.inference.cpu_threads,
             "task": config.get("task"),
             "language": config.get("language"),
@@ -581,6 +615,25 @@ def build_parser() -> argparse.ArgumentParser:
     server.add_argument("--log_level", default="INFO", help="Logging level (default: INFO)")
 
     model = parser.add_argument_group("model")
+    model.add_argument(
+        "--backend",
+        default=os.environ.get("ASR_BACKEND", "faster-whisper"),
+        choices=["faster-whisper", "openvino"],
+        help="Inference stack: faster-whisper (CTranslate2) or openvino (exported IR). "
+        "Defaults to $ASR_BACKEND, or faster-whisper.",
+    )
+    model.add_argument(
+        "--ov_precision",
+        default=os.environ.get("OV_PRECISION", "int8"),
+        choices=["int8", "fp32"],
+        help="Which IR the openvino backend loads: models/ov-int8 or models/ov-fp32. "
+        "Defaults to $OV_PRECISION, or int8. Ignored unless --backend openvino.",
+    )
+    model.add_argument(
+        "--ov_device",
+        default=os.environ.get("OV_DEVICE", "GPU"),
+        help="OpenVINO device for the openvino backend, e.g. GPU, GPU.1, CPU. Defaults to $OV_DEVICE, or GPU.",
+    )
     model.add_argument("--model_name_or_path", default="models", help="CTranslate2 model directory (default: models)")
     model.add_argument("--device", default="auto", help="cpu, cuda, auto (amd/rocm/hip alias to cuda)")
     model.add_argument("--compute_type", default="auto", help="float16, int8_float16, int8, auto, ...")
@@ -640,6 +693,10 @@ def resolve_args(argv: list[str] | None = None) -> argparse.Namespace:
     # default the other way, while still honouring an explicit flag.
     if args.task is None:
         args.task = "transcribe"
+    # --model_name_or_path names a CTranslate2 directory. Left at its default under
+    # the openvino backend, it becomes the IR directory the precision selects.
+    if args.backend == "openvino" and args.model_name_or_path == "models":
+        args.model_name_or_path = os.path.join("models", f"ov-{args.ov_precision}")
     return args
 
 

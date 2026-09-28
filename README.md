@@ -177,6 +177,66 @@ CI builds this image on every push and smoke-tests it (`serve.py --help`,
 loading or transcription — the image carries no weights — so a change to the
 pipeline still wants one real request against a running container.
 
+## OpenVINO backend
+
+A second image runs the ASR model on an Intel GPU through OpenVINO, keeping the
+VAD on the CPU. The CPU image is unchanged and still uses CTranslate2.
+
+```bash
+podman build -t asmr-asr-ov --format oci -f containerfile.openvino .
+podman run --rm -v ./models:/srv/models:Z asmr-asr-ov python fetch_models.py --only vad
+podman run --rm --device /dev/dri --group-add keep-groups \
+    -v ./models:/srv/models:ro,Z -p 127.0.0.1:8000:8000 asmr-asr-ov
+```
+
+`--device /dev/dri` and `--group-add keep-groups` are both required. Without them
+OpenVINO finds no GPU, runs on the CPU, and reports nothing unusual. `clinfo` is in
+the image to check from inside it, and `GET /health` reports the device in use.
+
+Three flags select the stack, each defaulting to an environment variable so the
+image can be configured without changing its command:
+
+| flag | env | default | meaning |
+|---|---|---|---|
+| `--backend` | `ASR_BACKEND` | `faster-whisper` | `faster-whisper` or `openvino` |
+| `--ov_precision` | `OV_PRECISION` | `int8` | `int8` or `fp32`, selecting the IR directory |
+| `--ov_device` | `OV_DEVICE` | `GPU` | any OpenVINO device, e.g. `GPU`, `GPU.1`, `CPU` |
+
+The precision names a directory under the models volume, so both can be present:
+
+```
+models/ov-int8/     1.6 GB of weights
+models/ov-fp32/     6.2 GB of weights
+```
+
+`--model_name_or_path` overrides that path directly. Build the IR outside the
+image; `bench/README.md` covers the export, including the Python 3.14 issue that
+breaks `optimum-cli`.
+
+### What differs from the CTranslate2 path
+
+`ov_backend.py` answers the same `transcribe()` call faster-whisper does, so the
+pipeline, VAD, smart splitting, segment merging and subtitle writers are shared.
+The decoder differs in three ways:
+
+- **Hotwords become `prompt_ids`.** faster-whisper takes a string and truncates it
+  at 223 tokens. transformers has no `hotwords` parameter; the same slot is reached
+  through `WhisperProcessor.get_prompt_ids`, and it counts prompt + special tokens
+  + `max_new_tokens` against the model's 448 positions and raises when they exceed
+  it. The backend computes that budget per request and keeps the 223-token cap, so
+  a hotword list behaves the same on both backends. Longer lists are truncated,
+  silently, as they always were.
+- **Decoding settings that have no OpenVINO equivalent are ignored**, and logged
+  once each at startup rather than per request. `task`, `language`, `beam_size`,
+  `hotwords`, `repetition_penalty` and `clip_timestamps` are honoured.
+- **The backend runs no VAD of its own**, so the speech total in the response comes
+  from the pipeline's own VAD pass rather than from the decoder.
+
+It lives outside the `asr/` package because it imports transformers, which `asr/`
+is kept free of (see [Why the dependency list is short](#why-the-dependency-list-is-short));
+`asr/server.py` imports it inside the branch that selects the backend, so the CPU
+image never loads it.
+
 ## How it works
 
 1. **Decode** — ffmpeg via `av`, to 16 kHz mono

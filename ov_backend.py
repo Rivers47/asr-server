@@ -1,0 +1,200 @@
+#!/usr/bin/env python3
+"""
+OpenVINO backend: an exported IR behind faster-whisper's transcribe() shape.
+
+This module lives outside the asr package because it imports transformers, which
+asr/ is kept free of -- see tests/test_dependencies.py. Only the OpenVINO image
+installs that stack, and asr/server.py imports this file lazily, inside the branch
+that selects the backend.
+
+``OpenVinoWhisperModel`` answers the same ``transcribe(audio, **config)`` call
+``faster_whisper.WhisperModel`` does and returns the same ``(segments, info)``
+pair, so ``TranscriptionService`` and ``Inference._transcribe_smart_chunks`` hold
+either one without knowing which.
+
+The IR is built outside the server -- see bench/README.md -- and selected by
+directory: models/ov-int8 or models/ov-fp32.
+"""
+
+import logging
+import os
+from dataclasses import dataclass
+from types import SimpleNamespace
+from typing import Any
+
+import numpy as np
+
+_OPTIMUM_INTEL_IMPORT_ERROR = None
+
+try:
+    from optimum.intel import OVModelForSpeechSeq2Seq
+    from transformers import WhisperProcessor
+except Exception as e:  # pragma: no cover - exercised only on an image without the stack
+    _OPTIMUM_INTEL_IMPORT_ERROR = e
+    OVModelForSpeechSeq2Seq = None
+    WhisperProcessor = None
+
+logger = logging.getLogger(__name__)
+
+WHISPER_SAMPLING_RATE = 16_000
+# Whisper's encoder consumes exactly 30 s; the exported encoder IR is fixed at
+# [?, 128, 3000] frames, so longer input is decoded one window at a time.
+WINDOW_SAMPLES = 30 * WHISPER_SAMPLING_RATE
+MAX_NEW_TOKENS = 440
+# faster-whisper truncates hotwords to max_length // 2 - 1 tokens.
+HOTWORDS_TOKEN_CAP = 223
+# generate() prepends start-of-transcript, language and task tokens to the prompt.
+SPECIAL_TOKEN_SLOTS = 4
+DEFAULT_MAX_TARGET_POSITIONS = 448
+
+# Keys this backend acts on. Everything else in the generation config belongs to
+# CTranslate2 or to the pipeline itself and is reported once, then ignored.
+HONOURED_KEYS = frozenset({"task", "language", "beam_size", "hotwords", "repetition_penalty", "clip_timestamps"})
+PIPELINE_KEYS = frozenset(
+    {"vad_filter", "vad_parameters", "smart_split_with_vad", "target_chunk_duration_s", "segment_merge"}
+)
+
+
+def _require_openvino():
+    if OVModelForSpeechSeq2Seq is None or WhisperProcessor is None:
+        raise RuntimeError(
+            "Failed to import optimum.intel / transformers, which the OpenVINO backend needs. "
+            f"Original error: {_OPTIMUM_INTEL_IMPORT_ERROR}"
+        )
+    return OVModelForSpeechSeq2Seq, WhisperProcessor
+
+
+@dataclass
+class RawSegment:
+    """The subset of faster-whisper's Segment the pipeline reads: seconds and text."""
+
+    start: float
+    end: float
+    text: str
+
+
+def prompt_from_hotwords(processor, hotwords: str, max_target_positions: int) -> tuple[Any, int]:
+    """Hotwords as Whisper prompt tokens, with the max_new_tokens they leave room for.
+
+    faster-whisper takes hotwords as a string, encodes them into the decoder prompt
+    and truncates at 223 tokens. transformers exposes the same slot as ``prompt_ids``
+    but counts prompt + special tokens + ``max_new_tokens`` against the model's 448
+    ``max_target_positions`` and raises when they exceed it, so the budget is
+    computed here. The 223-token cap is kept so both backends see the same content.
+    """
+    if not hotwords:
+        return None, MAX_NEW_TOKENS
+    prompt_ids = processor.get_prompt_ids(hotwords, return_tensors="pt")
+    if len(prompt_ids) - 1 > HOTWORDS_TOKEN_CAP:  # index 0 is <|startofprev|>
+        prompt_ids = prompt_ids[: HOTWORDS_TOKEN_CAP + 1]
+    budget = max_target_positions - len(prompt_ids) - SPECIAL_TOKEN_SLOTS
+    return prompt_ids, max(1, min(MAX_NEW_TOKENS, budget))
+
+
+def _decode_path(audio_path: str) -> np.ndarray:
+    try:
+        from faster_whisper.audio import decode_audio
+    except Exception as e:
+        raise RuntimeError(
+            f"Decoding {audio_path} needs faster_whisper.audio (which brings PyAV). "
+            f"Pass decoded samples instead. Original error: {e}"
+        ) from e
+    return np.asarray(decode_audio(audio_path, sampling_rate=WHISPER_SAMPLING_RATE), dtype=np.float32)
+
+
+def _spans_from_clip_timestamps(clip_timestamps: Any, total_s: float) -> list[tuple[float, float]]:
+    """Flat [start, end, start, end, ...] seconds, as vad_segments_to_clip_timestamps emits."""
+    if not clip_timestamps:
+        return [(0.0, total_s)]
+    if isinstance(clip_timestamps, str):
+        values = [float(part) for part in clip_timestamps.split(",") if part.strip()]
+    elif isinstance(clip_timestamps, (list, tuple)) and clip_timestamps and isinstance(clip_timestamps[0], dict):
+        return [(float(clip["start"]), float(clip["end"])) for clip in clip_timestamps]
+    else:
+        values = [float(value) for value in clip_timestamps]
+
+    spans = [(values[i], values[i + 1]) for i in range(0, len(values) - 1, 2)]
+    if len(values) % 2:  # trailing start with no end runs to the end of the audio
+        spans.append((values[-1], total_s))
+    return [(start, end) for start, end in spans if end > start]
+
+
+class OpenVinoWhisperModel:
+    """An exported OpenVINO Whisper IR, shaped like faster_whisper.WhisperModel."""
+
+    def __init__(self, model_dir: str, *, device: str = "GPU", ov_config: dict[str, Any] | None = None):
+        model_cls, processor_cls = _require_openvino()
+        self.model_dir = model_dir
+        self.device = (device or "GPU").strip().upper()
+        self.processor = processor_cls.from_pretrained(model_dir)
+        self.model = model_cls.from_pretrained(model_dir, device=self.device, ov_config=ov_config or {})
+        self.max_target_positions = int(
+            getattr(self.model.config, "max_target_positions", DEFAULT_MAX_TARGET_POSITIONS)
+        )
+        self._reported_ignored: set[str] = set()
+
+    def _report_ignored(self, config: dict[str, Any]) -> None:
+        ignored = sorted(set(config) - HONOURED_KEYS - PIPELINE_KEYS - self._reported_ignored)
+        if ignored:
+            self._reported_ignored.update(ignored)
+            logger.info("OpenVINO backend ignores these decoding settings: %s", ", ".join(ignored))
+
+    def _decode_window(self, window: np.ndarray, offset_s: float, params: dict[str, Any]) -> list[RawSegment]:
+        features = self.processor(window, sampling_rate=WHISPER_SAMPLING_RATE, return_tensors="pt").input_features
+        tokens = self.model.generate(features, return_timestamps=True, **params)
+        # tokenizer.decode, not processor.batch_decode: the batched call accepts
+        # output_offsets and then returns an empty offsets list, losing every timestamp.
+        decoded = self.processor.tokenizer.decode(tokens[0], skip_special_tokens=True, output_offsets=True)
+
+        window_end_s = offset_s + len(window) / WHISPER_SAMPLING_RATE
+        segments: list[RawSegment] = []
+        for chunk in decoded.get("offsets", []):
+            text = chunk.get("text", "").strip()
+            if not text:
+                continue
+            start, end = chunk["timestamp"]
+            # The final segment of a window can come back without an end timestamp.
+            absolute_start = offset_s + float(start)
+            absolute_end = window_end_s if end is None else offset_s + float(end)
+            if absolute_end > absolute_start:
+                segments.append(RawSegment(absolute_start, min(absolute_end, window_end_s), text))
+        return segments
+
+    def transcribe(self, audio: Any, **config: Any) -> tuple[list[RawSegment], SimpleNamespace]:
+        """Transcribe samples or a path, returning faster-whisper's (segments, info).
+
+        ``info`` carries ``duration`` only. It deliberately has no
+        ``duration_after_vad``: this backend runs no VAD of its own, and the
+        pipeline falls back to its own speech total when the attribute is absent.
+        """
+        samples = _decode_path(audio) if isinstance(audio, (str, os.PathLike)) else np.asarray(audio, dtype=np.float32)
+        total_s = len(samples) / WHISPER_SAMPLING_RATE
+        self._report_ignored(config)
+
+        prompt_ids, max_new_tokens = prompt_from_hotwords(
+            self.processor, config.get("hotwords") or "", self.max_target_positions
+        )
+        params: dict[str, Any] = {
+            "language": config.get("language") or "ja",
+            "task": config.get("task") or "transcribe",
+            "num_beams": max(1, int(config.get("beam_size") or 1)),
+            "max_new_tokens": max_new_tokens,
+            "prompt_ids": prompt_ids,
+        }
+        if config.get("repetition_penalty"):
+            params["repetition_penalty"] = float(config["repetition_penalty"])
+
+        segments: list[RawSegment] = []
+        for span_start, span_end in _spans_from_clip_timestamps(config.get("clip_timestamps"), total_s):
+            start_sample = max(0, min(len(samples), int(round(span_start * WHISPER_SAMPLING_RATE))))
+            end_sample = max(start_sample, min(len(samples), int(round(span_end * WHISPER_SAMPLING_RATE))))
+            for window_start in range(start_sample, end_sample, WINDOW_SAMPLES):
+                window = samples[window_start : min(window_start + WINDOW_SAMPLES, end_sample)]
+                if not len(window):
+                    continue
+                segments.extend(self._decode_window(window, window_start / WHISPER_SAMPLING_RATE, params))
+
+        return segments, SimpleNamespace(duration=total_s)
+
+    def describe(self) -> dict[str, Any]:
+        return {"backend": "openvino", "model": self.model_dir, "device": self.device}

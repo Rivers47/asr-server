@@ -36,6 +36,24 @@ class DependencyHygieneTest(unittest.TestCase):
                 offenders = imported_modules(path) & BANNED
                 self.assertEqual(offenders, set(), f"{path.name} imports {offenders}")
 
+    def test_openvino_backend_stays_outside_the_package(self):
+        """ov_backend.py may import transformers; asr/ may not, so the import is lazy.
+
+        A module-level `import ov_backend` in asr/ would pull transformers into the
+        CPU image at startup, which is exactly what BANNED exists to prevent.
+        """
+        self.assertTrue((ROOT / "ov_backend.py").exists(), "ov_backend.py is missing")
+        for path in sorted((ROOT / "asr").glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            module_level = set()
+            for node in tree.body:  # top level only
+                if isinstance(node, ast.Import):
+                    module_level.update(alias.name.split(".")[0] for alias in node.names)
+                elif isinstance(node, ast.ImportFrom) and node.module:
+                    module_level.add(node.module.split(".")[0])
+            with self.subTest(file=path.name):
+                self.assertNotIn("ov_backend", module_level, f"{path.name} imports ov_backend at module level")
+
     def test_pyproject_declares_only_the_short_list(self):
         text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         block = text.split("dependencies = [", 1)[1].split("]", 1)[0]
