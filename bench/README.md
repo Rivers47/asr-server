@@ -199,13 +199,18 @@ Repro with no optimum involved:
 ```python
 import functools
 
+
 def f(config, allow_new=False, **kw): ...
+
 
 class C:
     NORMALIZED = functools.partial(f, allow_new=True)
-    def go(self): self.NORMALIZED("the-real-config")
 
-C().go()   # TypeError on 3.14
+    def go(self):
+        self.NORMALIZED("the-real-config")
+
+
+C().go()  # TypeError on 3.14
 ```
 
 Neither `optimum` nor `optimum-intel` claims 3.14 support, and 2.3.0 / 2.2.0 are
