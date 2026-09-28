@@ -20,7 +20,7 @@ BANNED = {"transformers", "librosa", "torch", "torchaudio", "scipy", "sklearn", 
 
 def imported_modules(path: Path) -> set[str]:
     """Every top-level module name imported anywhere in a file, lazy imports included."""
-    names = set()
+    names: set[str] = set()
     for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
         if isinstance(node, ast.Import):
             names.update(alias.name.split(".")[0] for alias in node.names)

@@ -12,7 +12,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-sys.modules.setdefault("pyjson5", types.SimpleNamespace(decode_io=json.load))
+# A stand-in module, so importing asr.pipeline does not need the real pyjson5.
+_pyjson5 = types.ModuleType("pyjson5")
+_pyjson5.decode_io = json.load  # type: ignore[attr-defined]
+sys.modules.setdefault("pyjson5", _pyjson5)
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import asr.injection as injection  # noqa: E402

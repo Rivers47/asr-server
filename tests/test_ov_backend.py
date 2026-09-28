@@ -9,7 +9,9 @@ import sys
 import threading
 import time
 import unittest
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -28,6 +30,8 @@ from ov_backend import (  # noqa: E402
     prompt_from_hotwords,
 )
 
+DecodeResult = Callable[[np.ndarray, float], list["RawSegment"]]
+
 
 class FakeProcessor:
     """get_prompt_ids the way WhisperProcessor does: <|startofprev|> then one id per character."""
@@ -36,6 +40,45 @@ class FakeProcessor:
 
     def get_prompt_ids(self, text, return_tensors=None):
         return [self.START_OF_PREV] + [1000 + index for index, _ in enumerate(text)]
+
+
+class StubModel(OpenVinoWhisperModel):
+    """The real class with the two OpenVINO calls overridden, built without __init__.
+
+    Subclassing rather than patching attributes keeps the signatures under mypy, and
+    skipping the base __init__ is what lets these tests run with no OpenVINO installed.
+    """
+
+    def __init__(
+        self,
+        *,
+        decode_result: DecodeResult | None = None,
+        loaded: bool = False,
+        idle_unload_s: float = 0.0,
+        device: str = "CPU",
+    ) -> None:
+        self.model_dir = "models/ov-int8"
+        self.device = device
+        self.processor = FakeProcessor()
+        self.ov_config = {}
+        self.idle_unload_s = idle_unload_s
+        self.model = object() if loaded else None
+        self._lock = threading.RLock()
+        self._last_used = 0.0
+        self._reported_ignored = set()
+        self.loads = 0
+        self.windows: list[tuple[float, int]] = []
+        self.params: dict[str, Any] = {}
+        self._decode_result = decode_result
+
+    def _load_model(self) -> Any:
+        self.loads += 1
+        return object()
+
+    def _decode_window(self, window: np.ndarray, offset_s: float, params: dict[str, Any]) -> list[RawSegment]:
+        self.windows.append((offset_s, len(window)))
+        self.params = params
+        return list(self._decode_result(window, offset_s)) if self._decode_result else []
 
 
 class SpanTest(unittest.TestCase):
@@ -80,25 +123,9 @@ class HotwordsPromptTest(unittest.TestCase):
 class TranscribeAssemblyTest(unittest.TestCase):
     """transcribe() windowing and timestamp offsets, with the decode step stubbed."""
 
-    def _model(self, decode_result=None):
-        model = object.__new__(OpenVinoWhisperModel)  # no IR, no OpenVINO runtime
-        model.model_dir = "models/ov-int8"
-        model.device = "CPU"
-        model.processor = FakeProcessor()
-        model.idle_unload_s = 0.0
-        model.model = object()  # stands in for a compiled model
-        model._lock = threading.RLock()
-        model._last_used = 0.0
-        model._load_model = lambda: object()
-        model._reported_ignored = set()
-        self.windows: list[tuple[float, int]] = []
-
-        def fake_decode(window, offset_s, params):
-            self.windows.append((offset_s, len(window)))
-            self.params = params
-            return list(decode_result(window, offset_s) if decode_result else [])
-
-        model._decode_window = fake_decode
+    def _model(self, decode_result: DecodeResult | None = None) -> StubModel:
+        model = StubModel(decode_result=decode_result, loaded=True)
+        self.windows = model.windows
         return model
 
     def test_one_window_per_30s_and_offsets_are_absolute(self):
@@ -136,14 +163,14 @@ class TranscribeAssemblyTest(unittest.TestCase):
     def test_hotwords_reach_the_decoder_as_prompt_ids(self):
         model = self._model()
         model.transcribe(np.zeros(WHISPER_SAMPLING_RATE * 5, dtype=np.float32), hotwords="ちゅぷっ", beam_size=5)
-        self.assertEqual(self.params["num_beams"], 5)
-        self.assertIsNotNone(self.params["prompt_ids"])
+        self.assertEqual(model.params["num_beams"], 5)
+        self.assertIsNotNone(model.params["prompt_ids"])
 
     def test_no_generated_length_is_passed(self):
         """max_length (448) already bounds prompt + specials + output; passing both warns."""
         model = self._model()
         model.transcribe(np.zeros(WHISPER_SAMPLING_RATE * 5, dtype=np.float32), hotwords="ちゅぷっ")
-        self.assertNotIn("max_new_tokens", self.params)
+        self.assertNotIn("max_new_tokens", model.params)
 
     def test_ignored_keys_are_reported_once(self):
         model = self._model()
@@ -176,29 +203,14 @@ class OvConfigTest(unittest.TestCase):
 class LoadPolicyTest(unittest.TestCase):
     """Lazy compile and idle release, with the OpenVINO call stubbed out."""
 
-    def _model(self, idle_unload_s):
-        model = object.__new__(OpenVinoWhisperModel)
-        model.model_dir = "models/ov-int8"
-        model.device = "GPU"
-        model.idle_unload_s = idle_unload_s
-        model.model = None
-        model._lock = threading.RLock()
-        model._last_used = 0.0
-        model._reported_ignored = set()
-        self.loads = 0
-
-        def fake_load():
-            self.loads += 1
-            return object()
-
-        model._load_model = fake_load
-        return model
+    def _model(self, idle_unload_s: float) -> StubModel:
+        return StubModel(idle_unload_s=idle_unload_s, device="GPU")
 
     def test_load_is_idempotent(self):
         model = self._model(0.0)
         model.load()
         model.load()
-        self.assertEqual(self.loads, 1)
+        self.assertEqual(model.loads, 1)
         self.assertIsNotNone(model.model)
 
     def test_unload_releases_and_reports_whether_it_did(self):
@@ -213,7 +225,7 @@ class LoadPolicyTest(unittest.TestCase):
         model.load()
         model.unload()
         model.load()
-        self.assertEqual(self.loads, 2)
+        self.assertEqual(model.loads, 2)
 
     def test_describe_reports_whether_memory_is_held(self):
         model = self._model(30.0)
