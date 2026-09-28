@@ -85,6 +85,19 @@ class DependencyHygieneTest(unittest.TestCase):
             with self.subTest(package=package):
                 self.assertEqual(data["tool"]["uv"]["sources"][package]["index"], "pytorch-cpu")
 
+    def test_openvino_releases_the_gpu_when_idle_by_default(self):
+        """A shared GPU is the expected case, so an idle server should not hold it."""
+        import sys
+
+        sys.path.insert(0, str(ROOT))
+        import json
+        import types
+
+        sys.modules.setdefault("pyjson5", types.SimpleNamespace(decode_io=json.load))
+        from asr.server import resolve_args
+
+        self.assertEqual(resolve_args([]).ov_idle_unload, 300.0)
+
     def test_vad_uses_the_faster_whisper_extractor(self):
         source = (ROOT / "asr" / "vad_manager.py").read_text(encoding="utf-8")
         self.assertIn("from faster_whisper.feature_extractor import FeatureExtractor", source)

@@ -236,7 +236,7 @@ image can be configured without changing its command:
 | `--backend` | `ASR_BACKEND` | `faster-whisper` | `faster-whisper` or `openvino` |
 | `--ov_precision` | `OV_PRECISION` | `int8` | `int8` or `fp32`, selecting the IR directory |
 | `--ov_device` | `OV_DEVICE` | `GPU` | any OpenVINO device, e.g. `GPU`, `GPU.1`, `CPU` |
-| `--ov_idle_unload` | `OV_IDLE_UNLOAD_S` | `0` | seconds of idleness after which device memory is released |
+| `--ov_idle_unload` | `OV_IDLE_UNLOAD_S` | `300` | seconds of idleness after which device memory is released; `0` holds it |
 
 The precision names a directory under the models volume, so both can be present:
 
@@ -257,17 +257,22 @@ breaks `optimum-cli`.
 
 ### Sharing the GPU
 
-By default the model is compiled in the constructor and held for the life of the
-process, so an idle server keeps its device memory. On a card shared with other
-containers that is antisocial: Intel's driver does not refuse the second claimant,
-it evicts buffers to system RAM over PCIe, so both workloads slow down and nothing
-logs a reason.
+A shared card is the expected case, so **the model is compiled on the first request
+and released after five minutes idle** (`--ov_idle_unload`, default 300). Holding it
+would be antisocial: Intel's driver does not refuse a second claimant, it evicts
+buffers to system RAM over PCIe, so both workloads slow down and nothing logs a
+reason.
 
-`--ov_idle_unload 300` switches to compiling on the first request and releasing
-after five minutes idle. Measured on CPU, where RSS stands in for VRAM: 454 MB
-before the first request, 4234 MB while loaded, back to 531 MB after the timeout —
-3.7 GB returned. The cost is recompiling on the next request after an idle period,
-which was 3.3 s on CPU and 5.8 s on an Arc from cold.
+Measured on CPU, where RSS stands in for VRAM: 454 MB before the first request,
+4234 MB while loaded, back to 531 MB after the timeout — 3.7 GB returned. The cost
+is recompiling after an idle period, 3.3 s on CPU and 5.8 s on an Arc from cold.
+Pass `--ov_idle_unload 0` to compile at startup and keep it resident, which suits a
+card this server has to itself.
+
+Compilation also passes `PERFORMANCE_HINT=LATENCY` and `NUM_STREAMS=1`. Requests are
+serialised behind a lock, so additional inference streams would only size device
+buffers for parallelism that cannot be used. Anything passed in `ov_config`
+overrides these.
 
 `GET /health` reports `loaded` and `idle_unload_s`, so whether the GPU is currently
 held is visible without inspecting the card. One lock covers compile, decode and

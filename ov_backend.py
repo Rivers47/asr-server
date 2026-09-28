@@ -46,6 +46,14 @@ WINDOW_SAMPLES = 30 * WHISPER_SAMPLING_RATE
 # faster-whisper truncates hotwords to max_length // 2 - 1 tokens.
 HOTWORDS_TOKEN_CAP = 223
 
+# Passed to compile_model unless the caller overrides them. The server decodes one
+# request at a time behind a lock, so inference streams beyond the first would size
+# device buffers for parallelism it cannot use.
+DEFAULT_OV_CONFIG = {
+    "PERFORMANCE_HINT": "LATENCY",
+    "NUM_STREAMS": "1",
+}
+
 # Keys this backend acts on. Everything else in the generation config belongs to
 # CTranslate2 or to the pipeline itself and is reported once, then ignored.
 HONOURED_KEYS = frozenset({"task", "language", "beam_size", "hotwords", "repetition_penalty", "clip_timestamps"})
@@ -70,6 +78,13 @@ class RawSegment:
     start: float
     end: float
     text: str
+
+
+def merged_ov_config(ov_config: dict[str, Any] | None) -> dict[str, Any]:
+    """DEFAULT_OV_CONFIG with the caller's entries taking precedence."""
+    merged = dict(DEFAULT_OV_CONFIG)
+    merged.update(ov_config or {})
+    return merged
 
 
 def prompt_from_hotwords(processor, hotwords: str) -> Any:
@@ -143,7 +158,7 @@ class OpenVinoWhisperModel:
         model_cls, processor_cls = _require_openvino()
         self.model_dir = model_dir
         self.device = (device or "GPU").strip().upper()
-        self.ov_config = dict(ov_config or {})
+        self.ov_config = merged_ov_config(ov_config)
         self.idle_unload_s = max(0.0, float(idle_unload_s or 0.0))
         self._model_cls = model_cls
         # The processor is tokeniser and feature extractor only: CPU-side, cheap, and

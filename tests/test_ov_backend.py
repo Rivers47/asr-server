@@ -17,12 +17,14 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from ov_backend import (  # noqa: E402
+    DEFAULT_OV_CONFIG,
     HOTWORDS_TOKEN_CAP,
     WHISPER_SAMPLING_RATE,
     WINDOW_SAMPLES,
     OpenVinoWhisperModel,
     RawSegment,
     _spans_from_clip_timestamps,
+    merged_ov_config,
     prompt_from_hotwords,
 )
 
@@ -151,6 +153,24 @@ class TranscribeAssemblyTest(unittest.TestCase):
         # A second call with the same key logs nothing, so the log is not per-request noise.
         with self.assertNoLogs("ov_backend", level="INFO"):
             model.transcribe(np.zeros(WHISPER_SAMPLING_RATE, dtype=np.float32), condition_on_previous_text=True)
+
+
+class OvConfigTest(unittest.TestCase):
+    def test_one_stream_by_default(self):
+        """Requests are serialised, so buffers for parallel streams would be wasted."""
+        config = merged_ov_config(None)
+        self.assertEqual(config["PERFORMANCE_HINT"], "LATENCY")
+        self.assertEqual(config["NUM_STREAMS"], "1")
+
+    def test_caller_entries_win(self):
+        config = merged_ov_config({"NUM_STREAMS": "4", "CACHE_DIR": "/tmp/x"})
+        self.assertEqual(config["NUM_STREAMS"], "4")
+        self.assertEqual(config["CACHE_DIR"], "/tmp/x")
+        self.assertEqual(config["PERFORMANCE_HINT"], "LATENCY")
+
+    def test_defaults_are_not_mutated(self):
+        merged_ov_config({"NUM_STREAMS": "4"})
+        self.assertEqual(DEFAULT_OV_CONFIG["NUM_STREAMS"], "1")
 
 
 class LoadPolicyTest(unittest.TestCase):

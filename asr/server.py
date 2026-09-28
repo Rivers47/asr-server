@@ -643,11 +643,10 @@ def build_parser() -> argparse.ArgumentParser:
     model.add_argument(
         "--ov_idle_unload",
         type=float,
-        default=float(os.environ.get("OV_IDLE_UNLOAD_S", "0") or 0),
+        default=float(os.environ.get("OV_IDLE_UNLOAD_S", "300") or 0),
         help="Seconds of idleness after which the openvino backend releases its device memory, "
-        "reloading on the next request. 0 (default) compiles at startup and holds it for the life "
-        "of the process. Set it when the GPU is shared, so an idle server is not squatting on VRAM. "
-        "Defaults to $OV_IDLE_UNLOAD_S.",
+        "reloading on the next request (default: 300). 0 compiles at startup and holds it for the "
+        "life of the process. Defaults to $OV_IDLE_UNLOAD_S.",
     )
     model.add_argument("--model_name_or_path", default="models", help="CTranslate2 model directory (default: models)")
     model.add_argument("--device", default="auto", help="cpu, cuda, auto (amd/rocm/hip alias to cuda)")
